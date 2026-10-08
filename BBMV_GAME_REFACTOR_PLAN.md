@@ -1,10 +1,50 @@
-# Scrapyard `game/` Architecture Refactor Plan
+# Scrapyard `game/` Architecture Refactor Plan — Revision 2
 
 > **PLAN ONLY.** Nothing in `aasumitro/bbmvc` was modified. This document is the blueprint for a later, incremental implementation.
 >
-> - **Repository analysed:** `aasumitro/bbmvc`, branch `main`, commit `f28082e` (2026-09-30, "Ask before Google Analytics…"). The product in the code is called **Scrapyard**. The brief calls it "BBMV".
-> - **Scope:** `game/src/` (the client) and `game/server/` (the authoritative game server), both one npm package.
-> - **Method:** I read the source, the repo's own architecture docs in `.claude/work/arch/`, `net/`, `mm/` and `nakama-mm/`, and both `AGENTS.md` files. A script built the import graph over all 119 `.ts`/`.tsx` files. I ran the full baseline (`lint`, `tsc -b`, `npm run check`, including `server:check`) on a local clone.
+> - **Revision 2 (2026-10-08)** analyses `main` at **`3b0943d`** (2026-10-07, "Custom lobbies: a list, invites, a waiting room, matches on the owner's settings (#4)": 100 files, +6,516 / −820 lines). **Revision 1** analysed `f28082e` (2026-09-30).
+> - **Scope:** `game/src/` (the client) and `game/server/` (the authoritative game server), one npm package. The product in the code is **Scrapyard**; the repo's briefs call it BBMV.
+> - **Method (revision 2):** read the whole custom-lobby commit, the repo's own plan and log for it (`.claude/work/custom/PLAN.md`, `LOG.md`), the updated `AGENTS.md` files and `.claude/work/arch/` notes; rebuilt the import graph over all 132 `.ts`/`.tsx` files; re-ran the full baseline (`lint`, `tsc -b`, `npm run check` including `server:check`) on a local clone, Linux x64, Node 22.22.2.
+
+---
+
+## Revision 2: what changed
+
+### R2.1 What the custom-lobby commit added (facts)
+
+| Area | What is new | Where |
+|---|---|---|
+| Lobby service | Lobbies, members, slots and sides, owners, bans, invite codes (40 bits, Crockford), passwords (scrypt + lockout), the tally, a 20 s grace, idle close, the public list. **Pure**: no sockets, rooms or timers; hooks for the rest (the pattern of `matchmaker.ts`) | `server/custom.ts` (499 lines), `server/custom.check.ts` (71 checks) |
+| Wiring | `lobby.ts` runs custom lobbies beside Classic's matcher: a session uses one or the other; a lobby's match gets a room of its own on the members' lobby sockets; `MAX_LOBBIES` (24); `/health` counts custom rooms and lobbies | `server/lobby.ts`, `server.ts`, `main.ts` |
+| Custom rooms | Room options `lobby`, `plan` (seat plan), `chat`, `over`, `idle`: bots only where the owner put them, empty seats, the end handed back to the lobby, abandoned after 10 s with nobody seated, a minute idle → back to the waiting room | `server/room.ts` |
+| Match settings | One typed object for how a match is played: size, duration, respawn speed, friendly fire, pickup groups, weapons, kill limit; `classic(mode)` for Classic/practice; `CUSTOM` choices; `checkSettings` = the one validator for form and server | `game/matchSettings.ts` (102) |
+| Pickups for any mode | The FFA item system became a module: catalogue, groups, a per-match `supply` (waves, expiry, effects), the token view; FFA keeps its hot zone (`ffa/zone.ts` view); TDM plugs the supply in when a lobby turns pickups on; `MatchMode.supply?` | `game/items/*`, `game/ffa/zone.ts` |
+| Empty seats | `Combatant.present`; `Life` gains `absent` (and `LIVES` is now defined once in `mode.ts`); `rules.leave/enter`; `sim.vacate/occupy`; the car row's `absent` flag (Classic rows byte-identical); `Seat.present` | `simulation.ts`, `mode.ts`, rules, `protocol.ts`, `net/client.ts`, view, HUD |
+| Friendly fire | The rules alone decide who is hurt (the simulation hands every hit over); a team kill costs the team a point; `Stats.teamKills`; bots hold fire near teammates (`Plan.careful`) | `simulation.ts`, `tdm/rules.ts`, `scoring.ts`, `ai.ts` |
+| 12 machines | Six starts per team base on both arenas (digests now `227c4ce7` / `8913ad26`); 12 bot names; HUD pools of 12 | arenas, `roster.ts`, `Hud.tsx` |
+| Wire | `PROTOCOL` 6; `lb` (18 actions) / `lbs` messages; lobby parsing in `parseClient`; `welcome.settings`, `welcome.lobby` | `net/protocol.ts` (477 → 604 lines) |
+| Page | The custom-lobby store (list, waiting room, the match on the same socket, coming back within the grace, `?join=` links); `link(socket, welcome, aside)` + `release()`; screens `Custom`, `Lobbies`, `Lobby`, `LobbyForm`, `Avatar`, `Confirm` | `net/custom.ts` (274), `net/connection.ts`, `App.tsx`, `screens/*` |
+| Checks | **Golden whole-match pins** (2 on the test yard, 4 on the real arenas), the custom lobby service, the page's store in `client.check`, many new cases elsewhere; `scripts/browser-match.mjs custom` | `simulation.check.ts`, `server.check.ts`, `custom.check.ts`, `client.check.ts` |
+
+### R2.2 What changed in this plan
+
+| # | Revision 1 said | Revision 2 says | Why |
+|---|---|---|---|
+| 1 | Phase 0: add golden fingerprints first | **Largely done by the repo.** Six whole-match pins exist; I re-ran the four real-arena pins on Linux x64 / Node 22.22.2 and got the hashes the repo's log recorded on macOS arm64 / Node 26.7 and 24.21. Phase 0 shrinks to the gaps: wire-byte fixtures and a pin for non-Classic settings | `server.check` output; `custom/LOG.md` phase 0 |
+| 2 | Pickups across modes: postpone until a second mode wants them | **Done** (the owner wanted TDM pickups in custom lobbies). §6.5 rewritten | `game/items/` |
+| 3 | "Custom" needs a product decision | **Decided and built:** a lobby flow plus parametrised matches (`MatchSettings`), not a third mode. §7.5 rewritten | `custom/PLAN.md` §1–2 |
+| 4 | `Life` declared three times | **Fixed** (`LIVES` in `mode.ts`). `Point {x,z}` is still declared three times | `mode.ts`, `tdm/types.ts`, `items/items.ts` |
+| 5 | One lint warning | **Fixed:** oxlint now reports 0 warnings | baseline |
+| 6 | Mode knowledge in shared code: 7 lines in 3 files | **NEW, worse:** 34 lines in 7 shared files, two of them on the server (`server/custom.ts`, `game/matchSettings.ts`) | §7.2 |
+| 7 | — | **NEW:** four rules are written twice or more across server and page: which side a slot is on (×3), when a lobby can start (×2), the tally key (×2), the biggest match's 12 seats (×5) | §1.5 |
+| 8 | — | **NEW:** `room.ts` branches on the kind of room (`lobby`) at about nine points | §2, §10 |
+| 9 | 0 import cycles, type imports included | **NEW:** value imports still have none, but one type-level cycle now spans 14 files. Two root edges | §3.4 |
+| 10 | — | **NEW:** the two page stores (`net/matchmaking.ts`, `net/custom.ts`) duplicate the socket, hello and reconnect machinery. The repo's own review found most of the custom feature's bugs in this layer | §9 |
+| 11 | `protocol.ts` cohesive, optional split | `protocol.ts` is now 604 lines, about a fifth of them (≈120) the lobby wire. **Split the lobby part out** (keep the file's path) | §9 |
+| 12 | Unchanged | Weapon identity by turret model (now also behind the lobby's one-gun setting); the turret ternary; hard-coded HUD weapon icons; the wire-event codec split across server and page; the server ignoring the chosen vehicle (and the seat plan has no vehicle); `MatchMode.show(camera)` with scenery wired in `modes.ts` (now pickups and the hot zone); the game↔net folder inversion; no boundary enforcement | §0.2 |
+| 13 | Phases 0–8, first five PRs | **Phases re-ordered and partly re-scoped; a new "mode traits" phase; first five PRs replaced** | §16, §22 |
+
+This revision stands alone: everything from revision 1 that still holds is restated here with today's numbers, so there is no need to read the two side by side. Revision 1 stays in this file's git history (commit `d9d7020`).
 
 ---
 
@@ -40,64 +80,53 @@
 
 ## 0. Read this first
 
-### 0.1 The main finding: the premise is partly out of date
+### 0.1 The main finding still holds, and the custom-lobby commit is evidence both ways
 
-The brief assumes the codebase needs to be *restructured into* a layered architecture. The evidence says most of the requested boundaries **already exist in code**, but not in folder names.
+The brief assumed the codebase needs restructuring into a layered architecture. Revision 1 found that most of the requested boundaries already exist in code (a refactor on 27 Sept 2026 split the old `match.ts`, introduced `MatchMode`, id-keyed registries, `SimEvents`, seeded randomness and `MatchSource`). The custom-lobby commit tests that finding with a large real feature:
 
-A refactor on 27 Sept 2026 (`.claude/work/arch/REFACTOR_REPORT.md`) already did the following:
+- **Where the seams held.** Custom lobbies reuse the room, the simulation, the records, the replays, the fair-play watch and the page's whole online match (`online.ts`, `net/client.ts`) without forking any of them. The repo's plan states the rule ("one implementation of the game") and kept it. Classic was held unchanged through the refactor by whole-match hashes. This is the strongest evidence so far that the existing seams work, and that a big-bang move into a 9-layer tree would mostly relabel boundaries that hold. [High confidence: I read the diff and re-ran the pins.]
+- **Where the seams leaked.** Where the existing contracts had no answer — *does this mode have teams? which sizes does it take? what are its Classic numbers? which side is slot 7 on? what kind of room is this?* — the new code asked directly: `mode === 'tdm'` (now in two server modules and three screens) and `lobby ? … : …` (about nine points in `room.ts`). Four rules now live in two or more places, on both sides of the wire.
 
-- Split a monolithic 838-line `match.ts` into:
-  - `simulation.ts`: authoritative, headless, player-agnostic.
-  - `view.ts`: Three.js, audio and camera; implements `SimEvents`.
-  - `pilot.ts`: the local control source.
-  - `feed.ts`: the kill feed and announcer.
-- Replaced about 12 `mode === 'tdm'` branches with a `MatchMode` contract and a `MODES` registry. The engine no longer branches on the mode.
-- Introduced id-keyed registries: `WEAPONS`, `VEHICLES` + `MODELS`, `MAPS`, `MODES`.
-- Seeded every gameplay random stream from the match seed, so a bots-only match replays bit for bit.
-- Moved the runtime out of React (`runtime.ts`). React only mounts and disposes it.
+So the recommendation sharpens rather than changes: **add the few small contracts the code keeps improvising (mode traits, shared lobby rules), enforce the boundaries mechanically, and do not big-bang the folders.**
 
-The online work then built on those seams:
+### 0.2 What blocks plug-and-play now (priority order)
 
-- `MatchSource` lets practice and online share one "player side" (`playMatch`).
-- The server runs **the same** `simulation.ts`, modes and bots.
-- Replays re-run a room to the bit.
-
-Moving everything into the proposed 9-layer tree (`app/ application/ domain/ engine/ networking/ presentation/ platform/ content/ shared/`) would therefore mostly **relabel boundaries that already hold**. The cost would be about 65 file moves (all of `src/game/`) plus import rewrites in 32 other files, 7 architecture docs and 2 `AGENTS.md` code maps invalidated, the balance probes and a deploy smoke script broken, and `git blame` harder to follow. **I do not recommend a big-bang restructure.** [High confidence: I read the refactor report and checked every claim against the current source.]
-
-### 0.2 What actually blocks "plug-and-play", in priority order
-
-| # | Problem (evidence) | Why it matters | Verdict |
+| # | Problem (evidence) | Status vs rev 1 | Verdict |
 |---|---|---|---|
-| 1 | **No cross-commit behaviour pinning.** `simulation.check.ts` compares two runs *in the same process* (`first === replay(7)`), and `server.check` compares a room with the bare simulation *in the same build*. A refactor that changes gameplay deterministically passes every check. Only arena layout is pinned across commits (`server/digests.json`). | Every refactor phase needs a tripwire first. | **REFACTOR (Phase 0)** |
-| 2 | **Boundaries are enforced by convention only.** The server imports `src/game/*`, and a DOM shim (`server/headless.ts`) keeps the arena builders alive in Node. `audio.ts` calls `window.addEventListener` *at import time*: one wrong import into a server-reachable module crashes the server at startup. `MODULE_BOUNDARIES.md` says the graph was "checked with an import-graph scan", but no such script exists in the repo or in CI, so it was a one-off manual check. | Multi-developer and multi-agent work will regress this. | **REFACTOR (Phase 1)** |
-| 3 | **Weapon identity is recovered from the turret model.** `weaponId = WEAPONS.find(w => w.model === spec.model)` (`net/protocol.ts:175`), because bots carry a *scaled copy* of the spec (`ai.ts botGun`). Two weapons sharing a turret model would be reported as the same weapon on the wire, in match records, in replays and in the HUD. | A latent correctness bug that the next weapon will hit. | **REFACTOR (Phase 2)** |
-| 4 | **Adding a weapon edits core files.** The turret is chosen by a ternary (`vehicle/vehicle.ts:195`: `weapon === 'rocketPod' ? buildRocketPod() : buildMinigun()`). The HUD icon is two hard-coded SVGs switched by `data-kind` (`hud/Hud.tsx:235–241`). `WeaponSpec.model` is a closed union type. | Contradicts the primary goal directly. | **REFACTOR (Phase 2)** |
-| 5 | **Mode-specific UI is concentrated in two files, plus one server branch.** `Hud.tsx` has 42 lines that reference `ffa`/`tdm`; `Results.tsx` has 26. `server/room.ts:219` has `if (kind !== 'tdm') return ''` (team chat). `MapSelect` already shows a disabled "Custom — coming soon". | A third mode edits `Hud.tsx`, `Results.tsx` and `room.ts`. | **REFACTOR (Phase 4)** |
-| 6 | **The wire-event codec is split across client and server, with positional indices.** The encoder is in `server/recorder.ts` and the decoder in `net/client.ts` (`f[11]`, `f[0] === me`…). | A new `SimEvents` callback touches 3 files, and a silent index mismatch is possible. | **REFACTOR (Phase 3)** |
-| 7 | **The server ignores the chosen vehicle.** `room.join` keeps the roster's vehicle. `server/server.check.ts:365` *deliberately fails* if `VEHICLES` gets a second entry. Bots always use `BOT_VEHICLE`. The garage has no vehicle pager. The `ro` wire message and the replay `join` line carry no vehicle. | A second vehicle is a **feature** (it needs a `PROTOCOL` bump), not a refactor. | **Postpone (Phase 7)** until a second vehicle is scheduled |
-| 8 | **`src/game/` is a 67-file folder mixing five concerns:** pure rules, the Rapier simulation, Three.js presentation, browser runtime, and the online adapter. `game/runtime.ts` and `game/online.ts` import `net/`, while `net/client.ts` imports `game/`. This is a folder-level inversion, not a file cycle. | Navigation; knowing what the server may import. | **REFACTOR, mechanical (Phase 5)**, after the fixes above |
+| 1 | **Mode knowledge outside the mode folders, and lobby rules written twice.** 34 lines naming `'tdm'`/`'ffa'` in 7 shared production files (rev 1: 7 lines in 3), including `server/custom.ts` (6: sides, slot claims, regrouping, start rules, tally) and `game/matchSettings.ts` (6: Classic numbers, sizes, friendly-fire validity). Which side a slot is on is computed in `tdm/mode.ts`, `server/custom.ts` and `screens/Lobby.tsx`; the start conditions in `server/custom.ts` and `Lobby.tsx` ("as the server holds it"); the tally key in `server/custom.ts` and `Results.tsx`. A third mode now edits about seven shared files, two of them on the server. | **NEW / worse** | **REFACTOR (Phase 3: mode traits + shared lobby rules)** |
+| 2 | **Boundaries are enforced by convention only.** Unchanged, with more surface: `server/custom.ts` is "pure like `matchmaker.ts`" by comment; `audio.ts` still runs `window.addEventListener` at import. The repo's own review (`custom/LOG.md`, 2026-10-06) found that agent-written log entries claimed checks that did not exist ("client.check had no custom-lobby case at all … its '50 checks' never existed"). | Unchanged | **REFACTOR (Phase 1)** |
+| 3 | **Weapon identity is recovered from the turret model** (`net/protocol.ts:254`). Bots carry a scaled copy of the spec, and now the lobby's one-gun setting re-fits people too. Two weapons sharing a turret model would be misreported on the wire, in records and in replays. | Unchanged | **REFACTOR (Phase 2)** |
+| 4 | **Adding a weapon edits core files:** the turret ternary (`vehicle/vehicle.ts:195`), two hard-coded HUD icons (`hud/Hud.tsx:237–243`), the closed `model` union. (Good news: `CUSTOM.weapons` derives from `WEAPONS`, so the lobby form offers a new gun automatically.) | Unchanged | **REFACTOR (Phase 2)** |
+| 5 | **A type-level import cycle across 14 files**, from two root edges: the `Mode` id type is derived from the `MODES` registry object (so `matchSettings.ts` imports the registry's module for a type), and `mode.ts` (the contract) imports `Supply` from `items/supply.ts`, which imports `mode.ts` back. Erased at runtime, but the ids sit at the top of the graph instead of the bottom. | **NEW** | **REFACTOR (Phase 2, type-only)** |
+| 6 | **The wire-event codec is split** (`server/recorder.ts` encodes, `net/client.ts` decodes with positional `f[n]`). | Unchanged | **REFACTOR (Phase 4)** |
+| 7 | **Mode UI and scenery:** `Hud.tsx`/`Results.tsx` still narrow on `mode.kind`; `MatchMode.show(camera)` remains; `modes.ts` wires `createPickups` and `createHotZone`, so the server bundle carries both views. The HUD's effect chips and minimap items now read `mode.supply` generically, which is better. | Partly better | **REFACTOR (Phase 5)** |
+| 8 | **`room.ts` branches on the room's kind** (`lobby`): seat choice, the gun, leaving, results → end or restart, abandonment, idle, `open()`, record and journal fields. | **NEW** | **REVIEW** now; **REFACTOR** into a small room-kind object only when a third kind (ranked, tournament, spectating) is planned |
+| 9 | **Two page stores duplicate the session-socket machinery** (dial + hello, retry schedule, `comeBack` loop, `sessionStorage` mark, attempt counters, welcome → link). | **NEW** | **REFACTOR, small (Phase 7):** shared helpers, two stores |
+| 10 | **Characterization gaps:** whole-match pins exist; wire bytes are not pinned; no pin covers non-Classic settings (12 seats, friendly fire, TDM pickups, kill limit, an empty seat). | Mostly done | **Phase 0 (test-only)** |
+| 11 | **A second vehicle is a feature:** the server ignores the chosen vehicle (`server/server.check.ts:368` fails on purpose if `VEHICLES` gets a second entry), bots use `BOT_VEHICLE`, the `SeatPlan` has no vehicle, `ro` and the journal's `join` carry no vehicle. | Unchanged (+ seat plan) | **Postpone (Phase 8)** |
+| 12 | **`src/game/` mixes five concerns** (now 71 files); `game/runtime.ts`/`online.ts` import `net/` while `net/` imports `game/`. | Unchanged | **REFACTOR, mechanical (Phase 6)** |
 
-Everything else is either **KEEP** (and good) or **REVIEW** (questionable, not clearly harmful). Details follow.
-
-### 0.3 Baseline (measured on commit `f28082e`, Node 22.22, local clone)
+### 0.3 Baseline (re-measured at `3b0943d`, Linux x64, Node 22.22.2)
 
 | Command | Result |
 |---|---|
-| `npm run lint` | pass; 1 pre-existing warning (`screens/Drawer.tsx:24`, react-hooks exhaustive-deps) |
+| `npm run lint` | pass, **0 warnings** (oxlint 1.85) |
 | `npx tsc -b` | clean |
-| `npm run check` | **all pass**: router ok · ffa 143 · tdm 163 · simulation 28 · loading 23 · protocol 70 · chat 14 · matchmaker 63 · fairplay 10 · bots 21 (kills a minute: easy 7.8, normal 13.8, hard 17.8) · arena 64 (digests `b0ce6b61` / `9896c223`) · server 133 · client 32 · netplay 33 |
-| Server bundle | main shared chunk 4,435 kB, because the server bundles Three.js and every visual arena builder (see §3) |
-| Import cycles | **0**, including type-only imports (script in Appendix B) |
-| Code size | about 19.2k lines of production TS/TSX (`src/` + `server/`, excluding checks); about 3.9k lines of `.check.ts` |
+| `npm run check` | **all pass:** router ok · bots 21 (kills a minute: easy 7.8, normal 13.8, hard 17.8) · ffa 152 · tdm 182 · simulation 58 · loading 23 · protocol 90 · chat 14 · matchmaker 63 · custom 71 · fairplay 10 · arena 72 (digests `227c4ce7` / `8913ad26`) · server 166 · client 47 · netplay 33 |
+| Golden pins (real arenas) | `tdm scrapyard d9ee9ad8fa7017af`, `tdm city 467400f8225aeea3`, `ffa scrapyard 3c2735848552d2b4`, `ffa city 6c4c3343a80b5f99`: **identical** to the pins recorded on macOS arm64. Cross-machine stability, which revision 1 marked "needs verification", is now shown on two platforms and three Node majors. |
+| Server bundle | main shared chunk 4,435 kB (unchanged: Three.js and every visual arena builder ride along) |
+| Import cycles | value imports: **0**; type-level: **1** strongly connected set of 14 files (§3.4) |
+| Code size | about 22.0k lines of production TS/TSX (rev 1: 19.2k) and about 4.9k lines of checks (rev 1: 3.9k); 132 files (rev 1: 119) |
+| CI on GitHub | not verified by me: this session cannot read the repo's check runs. My local run is the evidence. |
 
-CI runs Node 24 (`.github/workflows/ci.yml`); I ran Node 22.22. Everything passed on 22.22, so the Node version has no bearing on today's results. It can matter for the golden fingerprints proposed in Phase 0 (§18).
+The repo's own log records one known flaky check: `netplay.check`'s rough-link case (a wall-clock timing case) failed on a loaded M1 Pro in several runs and passed in others (`custom/LOG.md`, phases 0, 2 and 4). It is not caused by the custom work; see §13.4.
 
 ### 0.4 Labels used
 
 - **KEEP**: sound as it is; no refactor needed.
 - **REVIEW**: questionable but not clearly harmful; investigate before changing.
 - **REFACTOR**: change it, for the concrete reason given.
-- **[High / Medium / Low confidence]**: based on what I read or measured. "Needs verification" means I have not proven it.
+- **[High / Medium / Low confidence]**: based on what I read or measured. "Needs verification" means not proven.
 
 ---
 
@@ -108,173 +137,316 @@ CI runs Node 24 (`.github/workflows/ci.yml`); I ran Node 22.22. Everything passe
 ```
 game/
 ├── src/
-│   ├── main.tsx, App.tsx, analytics.ts, index.css   app shell: screen state machine, loadout, pick, online seat
-│   ├── screens/   (13 files)  React screens: Loading, MainMenu, Garage, MapSelect, GameCanvas (gameplay screen),
-│   │                          Results, Matchmaking overlay, Settings/PatchNotes panels, Menu/Drawer/Notice primitives
-│   ├── hud/       (3 files)   Hud.tsx (per-frame imperative DOM writes), minimap.ts (canvas), Chat.tsx
-│   ├── game/      (67 files)  everything else about the game (below)
-│   └── net/       (11 files)  protocol, socket, client mirror, prediction, interpolation, matchmaking store,
-│                              Nakama session, chat
-└── server/        (22 files)  authoritative game server: door + loop, lobby, matchmaker, room, recorder,
-                               rewind, fair-play, records, replay, headless arena builds, auth
+│   ├── main.tsx, App.tsx, analytics.ts, index.css   app shell: screens, loadout, pick, online seat; now also the custom store's
+│   │                                                 seat, the ?join= link and resuming a lobby after a reload
+│   ├── screens/   (19 files)  React screens; new: Custom (the arena screen's Custom entry), Lobbies (the list), Lobby (the
+│   │                          waiting room, 415 lines), LobbyForm (create/edit drawer), Avatar, Confirm (moved out of GameCanvas)
+│   ├── hud/       (3 files)   Hud.tsx (per-frame imperative DOM writes), minimap.ts, Chat.tsx (now also docked in the waiting room)
+│   ├── game/      (71 files)  everything else about the game; new: matchSettings.ts, items/ (config, items, supply, pickups), ffa/zone.ts
+│   └── net/       (10 files + 2 checks)  protocol, socket, client mirror, prediction, interpolation, two page stores
+│                              (matchmaking.ts for Classic, custom.ts for lobbies), Nakama session, chat
+└── server/        (~17 production files + checks)  door + loop, lobby (rooms, sessions, both flows), matchmaker (pure),
+                               custom (pure), room, recorder, rewind, fair-play, records, replay, headless arenas, auth
 ```
 
 ### 1.2 What each area owns today
 
-| Area | Owns | Key dependencies | Assessment |
-|---|---|---|---|
-| `src/` root | `App.tsx`: screen state (`loading → menu → garage → map-select → game`), `Loadout`, the mode/map pick, the online `Link`. `main.tsx`: mounts React and lazily imports `App`. | screens, `game/loadout`, `game/maps`, `game/modes`, `net/matchmaking` | **KEEP**. Small; React state holds only UI choices. |
-| `src/game/` sim part | `simulation.ts` (combatants, fixed step, firing, rockets, damage, wrecks, respawn, stuck recovery), `combat.ts` (weapon specs + trigger + hitscan), `physics.ts` (Rapier init, static world), `vehicle/drive.ts` (ray-cast car), `ai.ts` (bots), `scoring.ts`, `rng.ts`, `mode.ts` (contract), `roster.ts`, `loadout.ts` | Rapier; Three.js **math** (`Vector3`/`Quaternion`) | **KEEP** the design. Headless and seeded; proven by 3 check suites. |
-| `src/game/` modes | `ffa/`, `tdm/`: config, pure rules, adapter (`mode.ts`), tactics/items, checks; `modes.ts` registry | sim contract, `scoring.ts` | **KEEP** the design; UI leaks and one server leak remain (§7). |
-| `src/game/` content | `arena/*` (contract + 2 maps + kit), `vehicle/*` (spec registry, model, parts, drive), `materials/*` (library, GPU bake, recipes, facade shader), `geometry.ts`, `maps.ts` | Three.js, the material library → `renderer.ts` | **KEEP** mostly; registration leaks for weapons (§6). |
-| `src/game/` presentation | `view.ts`, `effects.ts`, `audio.ts`, `sounds.ts`, `camera.ts`, `environment.ts`, `postprocessing.ts`, `renderer.ts`, `turntable.ts`, `feed.ts`, `pilot.ts`, `input.ts`, `settings.ts` | Three.js, WebAudio, DOM | **KEEP**. `view` hears the sim only through `SimEvents` and state reads. |
-| `src/game/` runtime | `runtime.ts` (`startGame`: loading steps, scene, composer, loop, dev globals), `match.ts` (`playMatch` + `MatchSource` + practice `createMatch`), `online.ts` (online `MatchSource`), `loading.ts` (task runner + `STARTUP`) | everything above, **plus `net/`** | **KEEP** the design; **REFACTOR** its location (the game↔net folder inversion). |
-| `src/net/` | `protocol.ts` (messages, quantisation, binary snapshot, `parseClient` validation, `PROTOCOL`, `BUILD`), `connection.ts` (socket + `Link`), `client.ts` (DOM-free mirror of a server match), `prediction.ts`, `snapshots.ts`, `matchmaking.ts` (page store), `session.ts` (Nakama), `chat.ts` + `chatCommand.ts` | sim (`enlist`, `createWorld`, `MODES`, `drive.ts`), content registries | **KEEP**; the event codec is split (§9). |
-| `src/screens/` | Screens. `GameCanvas.tsx` (391 lines) starts/disposes `startGame` and owns the loading overlay, pause menu, exit confirm, results, keys and chat wiring. | runtime, `Match` type, registries, `net/chat`, `net/matchmaking` | **KEEP** the structure; **REVIEW** `GameCanvas` size. |
-| `src/hud/` | `Hud.tsx` (723 lines): markup rendered once (`memo`), then `update(match, camera)` writes the DOM every frame. Holds both modes' panels, the scoreboard and effect chips. | `Match`, `ffa/*`, `tdm/config`, `modes` | **REFACTOR**: per-mode panels (§7). |
-| `server/` | `main.ts` (env, arenas up front), `server.ts` (HTTP health, ws door: origins, auth, rate limits, strikes, backlog; one fixed-step loop; dev latency simulator), `lobby.ts` (rooms, seating, one connection per user), `matchmaker.ts` (pure), `room.ts` (one match: seats, input queues, sim step, snapshots, records, journal, fair-play watch, chat channel names), `recorder.ts` (SimEvents → wire), `rewind.ts` (lag compensation), `fairplay.ts` (pure), `records.ts` (disk), `replay.ts`/`replay-main.ts`, `arenas.ts` + `headless.ts` + `digests.json`, `auth.ts` (HS256) | `src/game/*` sim/modes/content, `src/net/protocol.ts` | **KEEP** flat; light extractions from `room.ts` (§10). |
+| Area | Owns | Assessment |
+|---|---|---|
+| `src/` root | `App.tsx` (130 lines): screen state, `Loadout`, the pick, the online `Link` from either store; `?join=` handling; resuming a search or a lobby after a reload | **KEEP**; it is the one place that knows both stores, which is right |
+| `src/game/` sim part | `simulation.ts` (431: + empty seats, every hit to the rules), `combat.ts`, `physics.ts`, `vehicle/drive.ts`, `ai.ts` (581: + careful bots, a weapon roster for `armBot`), `scoring.ts` (+ teammate path, `teamKills`), `rng.ts`, `mode.ts` (contract + `LIVES` + `ms`/`clock`), `roster.ts` (+ seat plans, sizes, settings), `loadout.ts`, **`matchSettings.ts`** | **KEEP** the design; `matchSettings.ts` mixes per-mode knowledge into a shared module (§7) |
+| `src/game/` modes | `ffa/`, `tdm/` (rules take `settings`; TDM gains friendly fire, team kills, a seeded stream, an optional supply), `modes.ts` (registry: `lineUp(arena, size)`, `create({…, settings})`), **`items/`** (the supply any mode plugs in) | **KEEP** the design; leaks listed in §7.2 |
+| `src/game/` content | arenas (bases now 6 a side), vehicles, materials, `maps.ts` | **KEEP**; weapon registration leaks unchanged (§6.2) |
+| `src/game/` presentation | `view.ts` (+ hides absent machines), effects, audio, camera, `feed.ts` (+ team kills), pilot, input, settings, turntable, renderer, environment, post-processing; **`items/pickups.ts`, `ffa/zone.ts`** (scenery) | **KEEP** |
+| `src/game/` runtime | `runtime.ts`, `match.ts` (practice plays `classic(mode)`), `online.ts`, `loading.ts` | **KEEP** the design; **REFACTOR** the location |
+| `src/net/` | `protocol.ts` (604: + lobby messages, `PROTOCOL` 6), `connection.ts` (+ `aside`, `release`), `client.ts` (+ empty seats), `prediction.ts`, `snapshots.ts`, `matchmaking.ts`, **`custom.ts`**, `session.ts`, `chat.ts` (+ notes) | **KEEP** the boundaries; split the lobby protocol out (§9); share the store helpers (§9) |
+| `src/screens/` | + the custom-lobby screens; `Results.tsx` (346: + the lobby's tally, Back to lobby); `GameCanvas.tsx` (345: Confirm moved out, custom labels); `MapSelect.tsx` (Custom enabled) | **KEEP** the structure; **REVIEW** `Lobby.tsx` size and its copy of server rules |
+| `src/hud/` | `Hud.tsx` (728): pools of 12, a TK column, effect chips and minimap items from `mode.supply` | **REFACTOR** into per-mode panels (§7) |
+| `server/` | `custom.ts` (499, pure) beside `matchmaker.ts`; `lobby.ts` (316) wires both flows; `room.ts` (613) hosts Classic and custom rooms; `server.ts` (321) keeps a session through a custom match; `rewind.ts` skips absent machines; `replay.ts` seats a custom room's people where the journal says | **KEEP** flat; light extractions (§10) |
 
-### 1.3 Good decisions (KEEP; do not undo)
+### 1.3 The custom-lobby flow (new)
 
-1. **React is out of the loop.** `renderer.setAnimationLoop(frame)` drives `match.frame`, and the HUD writes the DOM through an imperative handle. React re-renders only on loading steps and player-view phase changes (`GAME_LOOP.md`, verified in `runtime.ts` and `GameCanvas.tsx`).
-2. **One simulation for practice, server and replay.** `createSimulation` is called by practice (`match.ts`), by the room (`server/room.ts`) and by the replay (through `createRoom`). `server.check` asserts that "a room is the practice simulation, bit for bit".
-3. **`SimEvents` as a direct-call interface, not a bus.** Headless runs pass no-ops. The server passes the recorder. The browser passes the view.
-4. **Controls are plain data written by interchangeable control sources**: the pilot, a bot brain, a server input queue, a replay's `forced` input.
-5. **Pure, event-queue mode rules** with 143 and 163 checks, and an adapter (`MatchMode`) around them. `share()`/`mirror()` carry rules state online without the browser ever ticking rules.
-6. **Seeded randomness with separate streams**: simulation `seed ^ 0x9e3779b9`, bot guns `seed ^ 0x2545f491`, FFA rules `createRng(seed)`. Presentation (particles, pitch, shake) is deliberately unseeded.
-7. **`MatchSource`**: the player's side (`playMatch`) is identical for practice and online. Only the step source differs.
-8. **Protocol discipline**: quantised integers, binary snapshot frames, `PROTOCOL` bumps, a content-hash `BUILD` id, server-side `parseClient` clamping. The client sends intent only.
+```
+page                                                       game server (one process)
+ MapSelect ─ Custom.tsx ─┬─ Lobbies.tsx (list, join by code)
+                         └─ Lobby.tsx (waiting room, chat docked)
+            ▲ reads                                        server.ts  (door: hello with no map = a session)
+ net/custom.ts store ── socket: hello, {t:'lb', do} ─────►   lobby.ts ──► custom.ts (pure: lobbies, slots, owners,
+            │           ◄── {t:'lbs'} list, {t:'lb'} lobby       │          codes, passwords, tally, grace, idle)
+            │                                                    │  hooks.start(lobby, seat plan)
+            │                                                    ▼
+            │           ◄── welcome (settings, lobby) ────── room.ts (lobby, plan, chat, over, idle; empty seats)
+ connection.link(socket, welcome, aside) ── match: in / s / st / ro ── same simulation, recorder, rewind, fair play
+            │   lobby words during the match go to `aside`        │
+ App ─► GameCanvas ─► runtime ─► online.ts                       │ results over → over(winner) → lobby.ts finish()
+            │                                                    │   → release() the members' sockets → custom.over()
+ store: link.release() ◄── {t:'lb'} lobby (playing: false) ◄─────┘   → tally, everyone unready, waiting again
+ App ─► MapSelect (Custom entry: the waiting room)
+```
+
+A drop or a reload comes back within the 20 s grace (`back`); a minute without input in a custom match takes the person back to the waiting room on the same socket (Classic would hand the seat to a bot).
+
+### 1.4 Good decisions (KEEP; do not undo)
+
+Carried over from revision 1 and re-checked at `3b0943d`:
+
+1. **React is out of the loop.** `renderer.setAnimationLoop(frame)` drives `match.frame`, and the HUD writes the DOM through an imperative handle. React re-renders only on loading steps and player-view phase changes (`GAME_LOOP.md`; verified in `runtime.ts` and `GameCanvas.tsx`).
+2. **One simulation for practice, server and replay.** `createSimulation` is called by practice (`match.ts`), by the room (`server/room.ts`) and by the replay (through `createRoom`). `server.check` holds that "a room is the practice simulation, nothing more", and now also that a custom room replays to the bit.
+3. **`SimEvents` as a direct-call interface, not a bus.** Headless runs pass no-ops, the server passes the recorder, the browser passes the view.
+4. **Controls are plain data written by interchangeable control sources:** the pilot, a bot brain, a server input queue, a replay's `forced` input.
+5. **Pure, event-queue mode rules** (152 and 182 checks) behind an adapter (`MatchMode`). `share()`/`mirror()` carry rules state online without the browser ever ticking rules.
+6. **Seeded randomness with separate streams:** simulation `seed ^ 0x9e3779b9`, bot guns `seed ^ 0x2545f491` (`roster.ts`), FFA rules `createRng(seed)`, and (new) TDM rules `createRng(seed)`. The TDM stream is drawn only by the supply when a lobby turns pickups on, so Classic TDM's draws did not move. Presentation (particles, pitch, shake) is deliberately unseeded.
+7. **`MatchSource`:** the player's side (`playMatch`) is identical for practice and online; only the step source differs. Custom matches needed no third source.
+8. **Protocol discipline:** quantised integers, binary snapshot frames, `PROTOCOL` bumps (now 6), a content-hash `BUILD` id, server-side `parseClient` clamping. The client sends intent only.
 9. **Arena digests** held across browser, server, CI and the deploy smoke test.
-10. **The `.check.ts` convention**: plain-node self-checks with no test framework, plus Vite-bundled server checks that use real sockets.
+10. **The `.check.ts` convention:** plain-node self-checks with no test framework, plus Vite-bundled server checks over real sockets.
 11. **Session caches with explicit ownership** (`STATE_OWNERSHIP.md`): materials, baked textures, arenas and sound buffers live for the session; geometries are disposed per match.
 
-### 1.4 Problem decisions (REFACTOR or REVIEW)
+Added by the custom work:
+
+12. **`server/custom.ts` is pure with hooks**, exactly like `matchmaker.ts`: the clock injected (`LobbyHooks.now`), no sockets, rooms or timers; 71 plain-node checks drive it on a hand-moved clock.
+13. **One validator for match settings** (`checkSettings`): the drawer shows its errors, the server runs it again and trusts nothing else. It returns a fresh object, so no unnamed field gets through.
+14. **Settings are data that travel with the match:** the welcome, the replay header (with the lobby and the seat plan) and the match record carry them, so a custom room replays to the bit (`server.check`).
+15. **Empty seats keep every per-seat array's length** (snapshots, rewind, fair play, statistics). The machine is out of play (`present` false, body disabled), so no index anywhere shifts.
+16. **Classic's bytes did not move:** the `absent` flag is set only for an empty seat, so a Classic car row is the same bytes as before (`protocol.check` holds it); `classic(mode)` reproduces Classic's numbers (the pins hold it).
+17. **Pins were re-pinned on purpose, with reasons** (the new `teamKills` field; the new bases), and only after showing that the old hashes still matched with the new field left out. This is the right discipline; keep it.
+18. **Secrets stay secret:** codes and passwords are never logged (`server.check` asserts it); the list carries no code, password or user id; passwords are scrypt with a salt, compared in constant time, behind a lockout.
+19. **Custom rooms never leak into Classic:** `room.open()` is false for them, so neither the matcher nor a direct seat lands there; rooms are counted by kind on `/health`.
+
+### 1.5 Problem decisions (REFACTOR or REVIEW)
 
 | Problem | Evidence | Verdict |
 |---|---|---|
-| Weapon identity by turret model | `net/protocol.ts:175`, `ai.ts:71` (`botGun` copies the spec) | REFACTOR |
-| Closed-set turret and icon selection | `vehicle/vehicle.ts:195`, `hud/Hud.tsx:235–241`, `combat.ts:9` | REFACTOR |
-| Mode UI concentrated in HUD/Results; `room.ts` team-chat branch | `Hud.tsx:456–457, 676–677`; `Results.tsx:41, 106`; `room.ts:219` | REFACTOR |
-| `MatchMode.show(camera)` puts rendering in the gameplay contract | `game/mode.ts`; `modes.ts` injects `createPickups(scene)`, so the **server bundle includes pickups visuals** | REFACTOR (small) |
-| Wire-event codec split; positional indices | `server/recorder.ts` ↔ `net/client.ts` `play()`/`mine()` | REFACTOR |
-| Duplicate domain types | `Life` ×3 (`mode.ts`, `ffa/rules.ts`, `tdm/types.ts`); `Point {x,z}` ×3 (`mode.ts`, `tdm/types.ts`, `ffa/items.ts`); two unrelated `Seat` types (`mode.ts`, `net/protocol.ts`) | REFACTOR (type-only) |
-| Loadout validation duplicated | `loadout.ts savedLoadout()` vs `protocol.ts pick()` | REFACTOR (small) |
-| game↔net folder inversion | `game/runtime.ts → net/connection.ts`, `game/online.ts → net/client.ts`; `net/client.ts → game/*` | REFACTOR (move) |
-| Arena gameplay layout derived from the visual scene graph | `props.ts solid()` stores colliders in `userData`; `arena.ts collectColliders()` reads `matrixWorld`. The server must build the visual arena under a DOM shim, then `strip()` it. | **REVIEW → postpone** (digests guard it; §18) |
-| View reads Rapier internals | `view.ts` `wheelIsInContact`, `poseWheels` (suspension from the controller) | REVIEW (documented debt; fine while clients run a local world) |
-| `Garage.tsx → vehicle/drive.ts` for `drivePerformance` (pure maths inside a Rapier module) | `screens/Garage.tsx:6` | REVIEW (harmless; move if convenient) |
-| Unused Vitest dev dependency | `package.json`; `AGENTS.md` says "installed, unused" | REVIEW (owner decision) |
-| Legacy generators kept as reference | `VehicleGenerator.ts`, `ArenaGenerator.ts`, `proceduralTexture.ts` (no importers) | REVIEW (owner decision; `AGENTS.md` says keep) |
+| Mode knowledge in shared modules | 34 `'tdm'`/`'ffa'` lines in 7 shared files: `matchSettings.ts` 6, `server/custom.ts` 6, `screens/LobbyForm.tsx` 8, `screens/Lobby.tsx` 7, `hud/Hud.tsx` 4, `screens/Results.tsx` 2, `server/room.ts` 1 (+ data lists in `maps.ts` and `App.tsx`'s default pick, which are fine) | **REFACTOR** (Phase 3) |
+| Rules written twice or more across server and page | side of a slot: `tdm/mode.ts lineUp`, `server/custom.ts side()`, `screens/Lobby.tsx side()`; start conditions: `custom.ts unstartable()`, `Lobby.tsx startHint()`; tally key: `custom.ts over()`, `Results.tsx winnerKey()`; the biggest match's 12 seats: `Hud.tsx MARKERS`, `SCORE_ROWS`, `protocol.ts SLOTS`, `roster.ts BOT_NAMES` length, `CUSTOM.sizes` | **REFACTOR** (Phase 3). The server stays authoritative, so a drift only misleads the page (a wrong hint, a wrong tally highlight), but it will drift. |
+| Room-kind branching | `server/room.ts`: `lobby ? at : freeSeat()`, the gun, `leave` (empty seat vs bot), results → `end` vs `restart`, abandonment, idle, `open()`, record, journal header; also `lobby.ts` (rooms closing rule, `unseat`) and `server.ts` (keeping the session) | **REVIEW** (refactor with a third kind) |
+| Type-level cycle | `matchSettings.ts → type modes.ts`; `mode.ts ↔ items/supply.ts` | **REFACTOR** (Phase 2) |
+| Wire module depends on the AI module | `protocol.ts → matchSettings.ts → ai.ts` (for `DIFFICULTIES` keys): the wire format's import closure now holds the bot AI and Rapier, also in the plain-node `custom.check` | **REFACTOR** (Phase 2: difficulties as a leaf data module) |
+| Two page stores, same machinery | `net/matchmaking.ts` and `net/custom.ts`: dial, `RETRY`, `comeBack`, `sessionStorage` mark, `attempt`, welcome → link | **REFACTOR, small** (Phase 7) |
+| `protocol.ts` growth | 604 lines; lobby types, `LOBBY_ACTIONS`, `INVITE`, `readCode`, `tidy`, `LOBBY_FORM`, `lobbying()` | **REFACTOR** (Phase 4): `net/lobbyProtocol.ts`; `protocol.ts` keeps `PROTOCOL` and its path |
+| `screens/Lobby.tsx` size | 415 lines: slots grid, owner menus, the bar and its hint, settings card, invite, tally, chat, keys | **REVIEW**: split when next touched (Phase 7) |
+| Weapon identity by turret model (unchanged) | `net/protocol.ts:254` (`weaponId`); `ai.ts:73` (`botGun` copies the spec); a custom seat is armed with `WEAPONS[gun]` and the lobby's one-gun setting goes through the same lookup | **REFACTOR** (Phase 2) |
+| Closed-set turret and icon selection (unchanged) | `vehicle/vehicle.ts:195` (`weapon === 'rocketPod' ? … : …`); `hud/Hud.tsx:237–243` (two inline SVGs); the closed `model` union in `combat.ts` | **REFACTOR** (Phase 2) |
+| Rendering in the gameplay contract (unchanged, wider) | `game/mode.ts:89` `show(camera)`; `modes.ts:37, 44` inject `createPickups(scene)` and `createHotZone(scene)`, so the **server bundle includes both views** | **REFACTOR** (Phase 5) |
+| Wire-event codec split; positional indices (unchanged) | `server/recorder.ts` encodes ↔ `net/client.ts` `play()`/`mine()` decode with `f[n]` | **REFACTOR** (Phase 4) |
+| Duplicate domain types (partly fixed) | `Life` is now defined once (`LIVES` in `mode.ts`); `Point {x,z}` ×3 (`mode.ts:28`, `tdm/types.ts:8`, `items/items.ts:35`); two unrelated `Seat` types (`mode.ts:60`, `net/protocol.ts:110`) | **REFACTOR** (type-only, Phase 2) |
+| Loadout validation duplicated (unchanged) | `loadout.ts savedLoadout()` vs `protocol.ts pick()` (line 578) | **REFACTOR, small** (Phase 2) |
+| game↔net folder inversion (unchanged) | `game/runtime.ts → net/connection.ts`, `game/online.ts → net/client.ts`, while `net/client.ts → game/*` | **REFACTOR** (move, Phase 6) |
+| Arena gameplay layout derived from the visual scene graph (unchanged) | `props.ts solid()` stores colliders in `userData`; `arena.ts collectColliders()` reads `matrixWorld`; the server builds the visual arena under a DOM shim, then `strip()`s it | **REVIEW → postpone** (digests guard it; §18) |
+| View reads Rapier internals (unchanged) | `view.ts` `wheelIsInContact` (lines 221, 237), `poseWheels` (suspension from the controller) | **REVIEW** (documented debt; fine while clients run a local world) |
+| `Garage.tsx → vehicle/drive.ts` for `drivePerformance` (unchanged) | `screens/Garage.tsx:6`: pure maths inside a Rapier module | **REVIEW** (harmless; move if convenient) |
+| Unused Vitest dev dependency (unchanged) | `package.json`; `AGENTS.md` says "installed, unused" | **REVIEW** (owner decision) |
+| Legacy generators kept as reference (unchanged) | `VehicleGenerator.ts`, `ArenaGenerator.ts`, `proceduralTexture.ts` (no importers outside the three) | **REVIEW** (owner decision; `AGENTS.md` says keep) |
 
 ---
 
 ## 2. God objects
 
-Size alone is not a defect. `city.ts` (833 lines) and `recipes.ts` (690) are big, single-purpose content files. The files below were judged on **responsibilities**.
+Size alone is not a defect: `city.ts` (836 lines), `recipes.ts` (690) and `scrapyard.ts` (640) are big, single-purpose content files. The files below were judged on **responsibilities**. The summary comes first; each file then gets the brief's format (current responsibilities, what should remain, what should move, destination, reason, risk). Phases refer to §16.
 
-### `game/match.ts` (318 lines): **KEEP** (one small split)
+### 2.1 Summary
+
+| File | Lines (rev 1 → rev 2) | Verdict | In one line |
+|---|---|---|---|
+| `game/match.ts` | 318 → 320 | **KEEP** (one small split) | `createMatch` → `runtime/practice.ts` (Phase 7) |
+| `game/simulation.ts` | 395 → 431 | **KEEP** | Empty seats landed cleanly; highest determinism risk if touched |
+| `game/runtime.ts` | 160 → 160 | **KEEP** (move folder) | Unchanged by the custom work |
+| `game/ai.ts` | 556 → 581 | **REFACTOR** (Phases 2, 7) | `DIFFICULTIES` to a leaf (the wire imports it); split by responsibility later |
+| `game/view.ts` | 291 → 293 | **KEEP** | Weapon cue becomes data (Phase 2) |
+| `game/matchSettings.ts` | new, 102 | **KEEP** (Phase 3 edits) | Per-mode facts move to traits |
+| `ffa/rules.ts`, `tdm/rules.ts` | 536 → 536, 335 → 380 | **KEEP** | One `Point` import |
+| `server/server.ts` | 310 → 321 | **KEEP** | Optional `netsim.ts` |
+| `server/room.ts` | 567 → 613 | **REFACTOR, light** (Phases 3, 7) | `journal.ts`, `inputs.ts`; group the custom options; no `RoomKind` yet |
+| `server/lobby.ts` | 224 → 316 | **REVIEW** | Two flows, one job; extract only with a third flow |
+| `server/matchmaker.ts` | 278 → 278 | **KEEP** | |
+| `server/custom.ts` | new, 499 | **KEEP** (Phase 3 edits) | Its mode branches and two rules move to traits and `lobbyRules.ts` |
+| `hud/Hud.tsx` | 723 → 728 | **REFACTOR** (Phases 2, 3, 5) | Per-mode panels; pools from `MAX_SEATS`; icon from data |
+| `screens/GameCanvas.tsx` | 391 → 345 | **REVIEW** | Shrank; optional component split |
+| `screens/Results.tsx` | 319 → 346 | **REFACTOR** (Phases 3, 5) | Per-mode panels; `winnerKey` → shared tally key |
+| `screens/Lobby.tsx` | new, 415 | **REVIEW** (Phases 3, 7) | Two server rules re-implemented; split when next changed |
+| `net/client.ts` | 420 → 432 | **REFACTOR, light** (Phase 4) | Decode through the codec |
+| `net/protocol.ts` | 477 → 604 | **REFACTOR** (Phases 2, 3, 4) | Lobby wire out; `weaponId`; keep the path |
+| `net/custom.ts` | new, 274 | **REFACTOR, small** (Phase 7) | Share dial/retry/mark helpers with `matchmaking.ts` |
+
+### `game/match.ts` (320 lines): **KEEP** (one small split)
 
 | | |
 |---|---|
-| **Current responsibilities** | `playMatch`: the player's side of any match (pilot wiring, the fixed-step accumulator, interpolation, player-view phase machine, pause/restart/lose, HUD-facing state object, debug lines). `createMatch`: the practice `MatchSource` (seeds, roster, world, view, mode, sim, feed). Types: `MatchSource`, `MatchParts`, `Match`. |
+| **Current responsibilities** | `playMatch`: the player's side of any match (pilot wiring, the fixed-step accumulator, interpolation, the player-view phase machine, pause/restart/lose, the HUD-facing state object, debug lines). `createMatch`: the practice `MatchSource` (seeds, roster, world, view, mode, simulation, feed); practice now plays `classic(mode)`. Types: `MatchSource`, `MatchParts`, `Match`. |
 | **Should remain** | `playMatch`, `MatchSource`, `Match`. |
-| **Should move** | `createMatch` → `runtime/practice.ts`, symmetric with `online.ts`. |
-| **Destination** | `runtime/match.ts` + `runtime/practice.ts` |
-| **Reason** | Clarity: the two sources would sit side by side. No behavioural reason. |
-| **Risk** | Low. Pure move; the seed pick (`freshSeed`, `Math.random`) moves with it. |
+| **Should move** | `createMatch`. |
+| **Suggested destination** | `runtime/match.ts` + `runtime/practice.ts`, symmetric with `runtime/online.ts` |
+| **Reason** | Clarity: the two match sources would sit side by side. No behavioural reason. |
+| **Risk** | Low. A pure move; the seed pick (`freshSeed`, `Math.random`, line 34) moves with it. |
 
-### `game/simulation.ts` (395 lines): **KEEP**
+### `game/simulation.ts` (431 lines): **KEEP**
 
 | | |
 |---|---|
-| **Current responsibilities** | Combatants (`enlist`, `reset`), one fixed step (think → drive → fire → `world.step` → read poses → crash → stuck → rockets → rules tick → respawn), hitscan (with the server's optional `castRound` hook), rockets and blasts, damage, wrecks, respawn via rules, stuck recovery, `standDown`, `restart`. |
+| **Current responsibilities** | Combatants (`enlist`, `reset`); one fixed step (think → drive → fire → `world.step` → read poses → crash → stuck → rockets → rules tick → respawn); hitscan (with the server's optional `castRound` hook); rockets and blasts; damage (every hit is handed to the rules, which decide who is hurt: friendly fire); wrecks; respawn via the rules; stuck recovery; `standDown`; `restart`. **New:** empty seats (`vacate`/`occupy`, `present` checks in every loop, the body taken out of the world). |
 | **Should remain** | All of it. It is the authoritative core, and its step order *is* the game's determinism. |
-| **Should move** | Nothing now. **Only if** a third firing behaviour (beam, homing, mine) is scheduled: turn `if (c.weapon.spec.rocket) return launch(c)` into a small table keyed by `spec.kind`. |
-| **Destination** | `sim/simulation.ts` (folder move only) |
-| **Reason** | Cohesive; well-checked. |
+| **Should move** | Nothing now. **Only if** a third firing behaviour (beam, homing, mine) is scheduled: turn `if (c.weapon.spec.rocket) return launch(c)` (line 281) into a small table keyed by `spec.kind`. |
+| **Suggested destination** | `sim/simulation.ts` (folder move only, Phase 6) |
+| **Reason** | Cohesive and well checked (58 checks plus the pins). The empty-seat change landed as a few small functions (`vacate`, `occupy` and their helpers) and `present` checks, not a fork. |
 | **Risk** | High if touched: step order, RNG draw order, Rapier call order (§18). |
 
 ### `game/runtime.ts` (160 lines): **KEEP** (move folder)
 
 | | |
 |---|---|
-| **Current responsibilities** | Match loading tasks, renderer settings, scene/sky/sun, arena borrow, practice-or-online match creation, composer + live settings, frame, resize, release, dev globals, online arena/digest validation. |
-| **Should remain** | All of it. This is the application-level composition. |
-| **Should move** | The folder: `game/` → `runtime/`, removing the `game → net` inversion. The session arena cache `loadArena` could move in from `maps.ts`. |
+| **Current responsibilities** | Match loading tasks, renderer settings, scene/sky/sun, arena borrow, practice-or-online match creation, the composer and live settings, the frame, resize, release, dev globals, the online arena/digest validation. |
+| **Should remain** | All of it: this is the application-level composition. |
+| **Should move** | The folder only. The arena session cache `loadArena` could move in from `maps.ts`. |
+| **Suggested destination** | `runtime/runtime.ts` (Phase 6), which removes the `game → net` inversion |
+| **Reason** | Folder honesty: it composes `net/`, so it cannot sit below it. |
 | **Risk** | Low. |
 
-### `game/ai.ts` (556 lines): **REFACTOR** (split by responsibility; Phase 6)
+### `game/ai.ts` (581 lines): **REFACTOR** (data out in Phase 2; split in Phase 7)
 
 | | |
 |---|---|
-| **Current responsibilities** | (1) Tuning (`AI`, `TACTICS`). (2) Difficulty (`Skill`, `DIFFICULTIES`, `armBot`, `botGun`). (3) The agent model (`Agent`, `Brain`, `Plan`, `createBrain`, `provoke`). (4) Perception (`feel`, `canSee`, `open`, `hiddenFrom`, `pickHideout`, `nodesInView`). (5) Navigation (`routesTo`, `travel`). (6) Targeting (`pickTarget`, `leadTarget`). (7) The decision loop (`think`). |
+| **Current responsibilities** | (1) Tuning (`AI`, `TACTICS`). (2) Difficulty (`Skill`, `DIFFICULTIES`, `Difficulty`, `WEAPON_IDS`, `armBot` with a weapon roster for the lobby's one-gun setting, `botGun`). (3) The agent model (`Agent`, `Brain`, `Plan` with the new `careful` flag, `createBrain`, `provoke`). (4) Perception (`feel`, `canSee`, `clearOfMates` (new), `open`, `hiddenFrom`, `pickHideout`, `nodesInView`). (5) Navigation (`routesTo`, `travel`). (6) Targeting (`pickTarget`, `leadTarget`). (7) The decision loop (`think`). |
 | **Should remain together** | `think` + targeting (they share per-call scratch state). |
-| **Should move** | `sim/ai/skill.ts` (Skill, DIFFICULTIES, armBot, botGun); `sim/ai/brain.ts` (Agent, Brain, Plan, createBrain, provoke); `sim/ai/perception.ts`; `sim/ai/navigation.ts`; `sim/ai/think.ts` (+ targeting). |
-| **Reason** | Five responsibilities in one file. AI tuning per weapon and new behaviours will land here; smaller files reduce merge conflicts for parallel agents. |
-| **Risk** | **Medium-high.** (a) The **order of `random()` draws** must not change. (b) Module-level scratch vectors (`goal`, `circling`, `weaving`, `lead`, `aimAt`, `from`, `along`, `ray`, `spot`, `errandAt`, …) must not become *shared* between functions that are live at the same time after the split. `bots.check` (behaviour ranges) plus the golden fingerprints (Phase 0) catch both. |
+| **Should move** | Phase 2: `Skill`, `DIFFICULTIES`, `Difficulty` → a leaf data module (no imports). Phase 7: the rest by responsibility. |
+| **Suggested destination** | `sim/difficulty.ts` (Phase 2); `sim/ai/skill.ts` (`armBot`, `botGun`, `WEAPON_IDS`), `sim/ai/brain.ts` (`Agent`, `Brain`, `Plan`, `createBrain`, `provoke`), `sim/ai/perception.ts`, `sim/ai/navigation.ts`, `sim/ai/think.ts` (+ targeting) (Phase 7) |
+| **Reason** | Seven responsibilities in one file; per-weapon tuning and new behaviours land here. **New:** the wire format depends on this module only for the difficulty names (`protocol.ts → matchSettings.ts → ai.ts`), so the wire's import closure holds the bot AI and Rapier, also in the plain-node `custom.check`. |
+| **Risk** | Low for the data move. **Medium-high for the split:** (a) the order of `random()` draws must not change; (b) the module-level scratch vectors (`goal`, `circling`, `weaving`, `lead`, `aimAt`, `from`, `along`, `spot`, `errandAt`, `toAim`, `toLead`) must not become *shared* between functions that are live at the same time. `bots.check` (behaviour ranges) and the golden pins catch both. |
 
-### `game/view.ts` (291 lines): **KEEP**
+### `game/view.ts` (293 lines): **KEEP**
 
-Cohesive. It builds models, implements `SimEvents` (effects, sound, shake, feedback pulses), handles interpolation, turret laying, ambient effects, engine audio, `refit`, restart and dispose. Only change: the fire sound cue is chosen by `c.weapon.spec.rocket ? 'launch' : 'shot'`. That becomes `spec.cue ?? …` when a weapon needs its own sound (§6).
+Cohesive. It builds models, implements `SimEvents` (effects, sound, shake, feedback pulses), interpolates, lays turrets, runs ambient effects and engine audio, `refit`s, restarts and disposes; **new:** it hides an absent machine (no model, smoke, fire or burning loop). Only change: the fire cue is chosen by `c.weapon.spec.rocket ? 'launch' : 'shot'` (line 114); that becomes `spec.cue ?? …` when a weapon needs its own sound (Phase 2, §6.2).
 
-### `server/server.ts` (310 lines): **KEEP** (optional extraction)
+### `game/matchSettings.ts` (102 lines, new): **KEEP** (Phase 2 and Phase 3 edits)
 
 | | |
 |---|---|
-| **Current responsibilities** | HTTP `/health`; the upgrade door (path, origin, per-address cap); per-socket protocol (hello deadline, version/build check, auth, rate tokens, strikes, backlog cut-off); routing to lobby or room; **dev latency simulator** (`held()`: lag, jitter, stalls, order-preserving); the fixed-step loop with catch-up cap; shutdown. |
-| **Should move (optional)** | `held()` + `stallEnd` → `server/netsim.ts` (dev/check-only concern). |
+| **Current responsibilities** | `MatchSettings` (size, duration, respawn, friendly fire, item groups, weapons, kill limit); `classic(mode)`; `RESPAWN` shares and `respawnWait`; `CUSTOM` (the owner's choices: modes, sizes per mode, durations, …); labels (`RESPAWN_LABELS`, `ITEM_GROUPS`, `weaponsLabel`, `killLimitLabel`, `minutes`); `checkSettings`, the one validator. |
+| **Should remain** | All of it, as the settings module (labels next to their data, as `VehicleSpec.blurb` does). |
+| **Should move** | The per-mode facts (Classic's size and duration, pickups in Classic, which sizes a mode takes, whether friendly fire applies) → traits (Phase 3); the `DIFFICULTIES` import → the leaf (Phase 2); `type Mode` from the leaf ids instead of the registry (Phase 2). |
+| **Suggested destination** | `modes/settings.ts` (Phase 6) |
+| **Reason** | Six `'tdm'`/`'ffa'` lines; it is one root of the type cycle and the reason the wire imports the AI. |
+| **Risk** | Low: `protocol.check` holds the validator and the pins hold `classic()`. |
+
+### `ffa/rules.ts` (536) and `tdm/rules.ts` (380): **KEEP**
+
+Pure, event-sourced, heavily checked (152 and 182 checks). The custom work (settings, friendly fire, team kills, the kill limit, the supply) landed inside them without leaking out. Only change: import `Point` from one place (Phase 2).
+
+### `server/server.ts` (321 lines): **KEEP** (optional extraction)
+
+| | |
+|---|---|
+| **Current responsibilities** | HTTP `/health` (rooms counted by kind, lobbies); the upgrade door (path, origin, per-address cap); per-socket protocol (hello deadline, version/build check, auth, rate tokens, strikes, backlog cut-off); routing a hello to the lobby (a session: Classic search or custom lobby) or to a room; **new:** keeping a session through a custom match (`release` hands the socket back); the **dev latency simulator** (`held()`, `stallEnd`: lag, jitter, stalls, order-preserving); the fixed-step loop with its catch-up cap (`CATCH_UP` 5); shutdown. |
+| **Should remain** | Everything except the latency simulator. |
+| **Should move (optional)** | `held()` + `stallEnd`. |
+| **Suggested destination** | `server/netsim.ts` (Phase 7) |
 | **Reason** | Separates a development tool from the production door. Low value; do it only when touching the file anyway. |
 | **Risk** | Low; `netplay.check` exercises it. |
 
-### `server/room.ts` (567 lines): **REFACTOR, light** (Phase 6)
+### `server/room.ts` (613 lines): **REFACTOR, light** (Phases 3 and 7)
 
 | | |
 |---|---|
-| **Current responsibilities** | Seats and humans (`join`, `leave`, `freeSeat`, `takeWheel`); **input queue policy** (queue, drain window, stale/idle, repeats/drops/depth stats); applying `Given` inputs; the **replay journal format** (`ReplayLine`, `Given`, `note()` row encoding) that `replay.ts` must mirror; the **fair-play watch** geometry (`watch`, eye/camera points); the first-match hold; the step orchestration; the **match record** (`MatchRecord`, `SeatRecord`, `matchRecord()`); snapshot/state broadcast; chat channel names; restart. |
-| **Should remain** | `step()` orchestration **in its exact order**; seats; broadcast; lifecycle. |
-| **Should move** | `server/journal.ts`: `ReplayLine`, `Given`, `DRIVING/STANDING/COASTING`, row encode/decode, shared by `room.ts` and `replay.ts` (today the format is implicit in both). `server/inputs.ts`: the per-person queue/drain/stale policy (pure, unit-checkable). `server/matchRecord.ts`: record types + builder (optional). |
-| **Reason** | The journal format is a persisted, versioned artefact that lives inside a 567-line file. The input policy is the most tuned code on the server (see `NET_LOG.md`) and deserves its own check. |
-| **Risk** | **Medium-high:** replay determinism and the journal's line semantics (`ahead()` in `replay.ts`). Guarded by `server.check`'s replay test and the golden fingerprints. |
+| **Current responsibilities** | Seats and people (`join`, `leave`, `freeSeat`, `takeWheel`); the **input queue policy** (queue, drain window, stale/idle, repeats/drops/depth statistics); applying `Given` inputs; the **replay journal format** (`ReplayLine`, `Given`, `DRIVING/STANDING/COASTING`, `note()` row encoding) that `replay.ts` mirrors; the **fair-play watch** geometry; the first-match hold; the step orchestration; the **match record** (`MatchRecord`, `SeatRecord`, `matchRecord()`, now with `custom`); snapshot/state broadcast; chat channel names (team channels branch on `kind !== 'tdm'`, line 236); restart. **New, custom rooms:** a seat plan (bots only where the owner put them, empty seats vacated at once), the lobby's chat channel, the person's own gun (no bot copy), leaving empties the seat instead of handing it to a bot, results → `end` (back to the lobby) instead of `restart`, abandonment after `ABANDON` (10 s) with nobody seated, the `idle` hook (a minute without input → back to the waiting room), `open()` false, `custom` in the record and `lobby`/`plan` in the journal header. |
+| **Should remain** | `step()` orchestration **in its exact order**; seats; broadcast; lifecycle; the custom-room branches, grouped. |
+| **Should move** | The journal format; the input queue policy; optionally the record builder. Group the five custom options (`lobby`, `plan`, `chat`, `over`, `idle`) into one `custom?: {…}` option; team chat from the `sides` trait (Phase 3). |
+| **Suggested destination** | `server/journal.ts` (shared by `room.ts` and `replay.ts`), `server/inputs.ts` (pure, with its own check), optional `server/matchRecord.ts` (Phase 7) |
+| **Reason** | The journal format is a persisted, versioned artefact inside a 613-line file, and the input policy is the most tuned code on the server (`NET_LOG.md`). The custom options are one concept spread over five optional parameters. **Do not** introduce a room-kind object for two kinds (§10). |
+| **Risk** | **Medium-high:** replay determinism and the journal's line semantics (`ahead()` in `replay.ts`). Guarded by `server.check`'s replay cases (Classic and custom) and the pins. |
+
+### `server/lobby.ts` (316 lines): **REVIEW**
+
+| | |
+|---|---|
+| **Current responsibilities** | Room lifecycle and seating for Classic (the matcher's hooks: rooms, ready checks, backfill, the drop grace); **new:** custom lobbies beside it (the `createLobbies` hooks: a room per lobby match on the members' lobby sockets, `place`, `finish`, `unseat`, `release` at the end), the one-flow-per-session rule, `MAX_LOBBIES`. |
+| **Should remain** | Both flows' wiring. It is still one job: who goes where. |
+| **Should move (only with a third flow)** | The `createLobbies` hooks (≈35 lines) and their `place`/`finish` helpers. |
+| **Suggested destination** | `server/customRooms.ts` |
+| **Reason** | Readability only. |
+| **Risk** | Low–medium: socket ownership at the lobby ↔ match boundary (§18). |
 
 ### `server/matchmaker.ts` (278 lines): **KEEP**
 
-Pure, clock-injected, with 63 checks. Cohesive. No refactor needed.
+Pure, clock-injected, 63 checks. Cohesive. Unchanged by the custom work.
 
-### `server/lobby.ts` (224 lines): **KEEP**
-
-Room lifecycle and seating policy. Cohesive.
-
-### `hud/Hud.tsx` (723 lines): **REFACTOR** (Phase 4, then Phase 6)
+### `server/custom.ts` (499 lines, new): **KEEP** (Phase 3 edits)
 
 | | |
 |---|---|
-| **Current responsibilities** | All HUD markup; element collection by `data-hud`; the per-frame update for compass, minimap, **FFA score/board/lead line**, **TDM team score/momentum**, clock/overtime (branching per mode), banner/countdown, feed, speed/health, **effect chips (FFA effects)**, weapon panel (**hard-coded icons**), crosshair, markers, hints, scoreboard (**mode-specific ordering, headers, labels**), debug. |
+| **Current responsibilities** | The custom-lobby domain: lobbies, members, slots and sides, owners and the hand-off, kicks and bans, invite codes (40 bits, Crockford), passwords (scrypt + salt, constant-time compare, lockout), the tally, the 20 s grace, idle close, the public list (no secrets), caps. Pure: the clock and every effect go through `LobbyHooks`. |
+| **Should remain** | All of it. |
+| **Should move** | Its six mode branches → traits (`sides`, `sideOf`); `unstartable` → `lobbyRules.startable`; the tally key in `over()` → `lobbyRules.tallyKey`. |
+| **Suggested destination** | `modes/traits.ts`, `net/lobbyRules.ts` (Phase 3); after Phase 4 it imports `net/lobbyProtocol.ts` |
+| **Reason** | The page re-implements three of these rules (§1.5); one home removes the drift. |
+| **Risk** | Low–medium: regrouping on a mode change and the tally keys are subtle; `custom.check` (71) drives them. |
+
+### `hud/Hud.tsx` (728 lines): **REFACTOR** (Phases 2, 3, 5; optional 7)
+
+| | |
+|---|---|
+| **Current responsibilities** | All HUD markup; element collection by `data-hud`; the per-frame update for compass, minimap, **FFA score/board/lead line**, **TDM team score/momentum**, clock/overtime (branching per mode), banner/countdown, feed, speed/health, **effect chips** (`EFFECTS`, a hard-coded list, read from `mode.supply`), weapon panel (**hard-coded icons**, lines 237–243), crosshair, markers (`MARKERS = 12`), hints, scoreboard (**mode-specific ordering, headers, labels**, a TK column, `SCORE_ROWS = 12`), debug; leaves absent machines out. |
 | **Should remain** | The shared HUD (compass, clock, banner, feed, vitals, weapon, crosshair, markers, debug) and the imperative-write pattern. |
-| **Should move** | Mode-specific panels → `modes/<mode>/hud.tsx` via a client-only `MODE_VIEWS` registry (§7). Weapon icon → weapon spec data (§6). Optionally split the shared parts into `hud/*.ts` helpers (Phase 6). |
-| **Reason** | This is the file a third mode must edit today. |
-| **Risk** | Medium: per-frame allocations, `data-hud` collection scope, `memo`. Visual parity is checked by hand in the browser (no screenshot tests exist). |
+| **Should move** | Mode panels; the weapon icon (to weapon data, Phase 2); the chip list (from `ITEMS`, Phase 5); the pool sizes (from `MAX_SEATS`, Phase 3); optionally the shared parts into helpers (Phase 7). |
+| **Suggested destination** | `modes/<mode>/hud.tsx` via the client-only `MODE_VIEWS` registry (Phase 5); optional `hud/{compass,vitals,weapon,feed,markers,scoreboard}.ts` |
+| **Reason** | This is the file a third mode or a new weapon must edit today. |
+| **Risk** | Medium: per-frame allocations, the `data-hud` collection scope (a mode panel must query only its own root, or the TDM panel grabs the FFA panel's slots), `memo`. Visual parity is checked by hand; no screenshot tests exist. |
 
-### `screens/GameCanvas.tsx` (391 lines): **REVIEW**
+### `screens/GameCanvas.tsx` (345 lines): **REVIEW**
 
-Loading overlay, failure/retry, pause menu, exit confirm, results, keyboard handling, chat wiring. Splitting into `PauseMenu`, `ExitConfirm` and `LoadingOverlay` components would help readability. **Do not** touch the `startGame`/dispose effect or the link-closing semantics without the StrictMode double-mount scenarios in mind (§18).
+Loading overlay, failure/retry, pause menu, exit confirm (now the shared `Confirm`), results, keyboard handling, chat wiring, custom labels from `link.welcome.lobby`. Splitting out `PauseMenu`, `ExitConfirm` and `LoadingOverlay` would help readability (Phase 7, optional). **Do not** touch the `startGame`/dispose effect or the link-closing semantics (now also `release` after a custom match) without the StrictMode double-mount cases in mind (§18).
 
-### `net/client.ts` (420 lines): **REFACTOR, light** (Phase 3)
+### `screens/Results.tsx` (346 lines): **REFACTOR** (Phases 3 and 5)
 
-Cohesive (the mirror). Only the wire-event **decode** (`play`, `mine`, positional `f[n]`) moves into a shared codec. Reconcile/place/step stay.
+| | |
+|---|---|
+| **Current responsibilities** | The results frame and the people line; per-mode panels by `mode.kind` branches (FFA's full record; TDM's team score and the MVP); Play again / Exit; **new:** for a lobby's match, the tally (`Tally` from `Lobby.tsx`), the winner highlight (`winnerKey`, line 82, mirroring the server's tally key) and Back to lobby. |
+| **Should remain** | The generic frame, the buttons, the lobby tally display. |
+| **Should move** | Per-mode panels (Phase 5); `winnerKey` → `lobbyRules.tallyKey` (Phase 3). |
+| **Suggested destination** | `modes/<mode>/results.tsx` via `MODE_VIEWS`; `net/lobbyRules.ts` |
+| **Reason** | Mode branching in a shared screen; a duplicated server rule. |
+| **Risk** | Medium: manual visual parity (win/draw/loss, the MVP, the tally highlight). |
 
-### `net/protocol.ts` (477 lines): **REVIEW**
+### `screens/Lobby.tsx` (415 lines, new): **REVIEW** (Phase 3 edits; split in Phase 7)
 
-A cohesive "wire" module. Optional: move the binary snapshot frame (`packCars`, `packSnapshot`, `unpackSnapshot`) to `net/snapshotFrame.ts`. **Do not move the file itself.** `scripts/match-smoke.mjs` reads `PROTOCOL` from the path `game/src/net/protocol.ts` with a regex.
+| | |
+|---|---|
+| **Current responsibilities** | The waiting room: the slot grid (sides, claims, bots and their difficulty, the owner's menus: kick, hand over, add or remove a bot), the bar (ready, start, and a hint from `startHint()` that mirrors the server's start rule), the settings card, the invite card (code, link), the tally (`Tally`), the docked chat, keys; `side()` mirrors the server's side rule. |
+| **Should remain** | The screen and its flow. |
+| **Should move** | `side()` and `startHint()` → `sideOf`/`startable` (Phase 3); the cards → components when next changed (Phase 7). |
+| **Suggested destination** | `net/lobbyRules.ts`, `modes/traits.ts`; `screens/custom/{SlotGrid,SettingsCard,InviteCard}.tsx` |
+| **Reason** | Two server rules re-implemented ("as the server holds it"); four concerns in one 415-line component. |
+| **Risk** | Low–medium: the hint must keep the server's order of reasons (`alone`, `waiting`, `sides`). |
 
-### `ffa/rules.ts` (536) and `tdm/rules.ts` (335): **KEEP**
+### `net/client.ts` (432 lines): **REFACTOR, light** (Phase 4)
 
-Pure, event-sourced, heavily checked. Only change: import the shared `Life`/`Point` types instead of redeclaring them.
+Cohesive: the online mirror (snapshots, prediction, reconciliation, the roster from `ro`, empty seats taken out of the local world). Only the wire-event **decode** (`play`, `mine`, positional `f[n]`) moves into the shared codec (`net/events.ts`). Reconcile, place and step stay.
+
+### `net/protocol.ts` (604 lines): **REFACTOR** (Phases 2, 3, 4)
+
+| | |
+|---|---|
+| **Current responsibilities** | `PROTOCOL` (6) and `BUILD`; message types; quantisation; the binary snapshot frame (`packCars`, `packSnapshot`, `unpackSnapshot`; `HEAD_BYTES` 14, `CAR_BYTES` 44, `ME_BYTES` 40; the `absent` flag (value 8) shares the existing flags byte); `parseClient` validation and clamping; `weaponId`; the loadout `pick()`; `SLOTS = 12`; **the lobby wire** (about a fifth of the file, ≈120 lines: `LOBBY_ACTIONS` (18), `INVITE`, `readCode`, `LOBBY_FORM`, `tidy`, `LobbyForm`, `Lobbying`, `LobbyRow`, `LobbySlot`, `LobbyView`, `LobbyNote`, the `lb`/`lbs` messages, `lobbying()`). |
+| **Should remain** | The match wire, in this file, at this path. |
+| **Should move** | The lobby wire (Phase 4; `parseClient` delegates `lb`); `weaponId` → `spec.id` and `pick()` → a shared `parseLoadout` (Phase 2); `SLOTS` → `MAX_SEATS` (Phase 3); optionally the binary frame. |
+| **Suggested destination** | `net/lobbyProtocol.ts`; `sim/loadout.ts` (`parseLoadout`); `modes/traits.ts` (`MAX_SEATS`); optional `net/snapshotFrame.ts` |
+| **Reason** | The lobby wire grows with every lobby feature; the identity defect (§6.2). |
+| **Risk** | Medium: bytes and JSON shapes; the Phase 0 fixtures guard them. **Do not move the file itself:** `scripts/match-smoke.mjs` reads `PROTOCOL` from `game/src/net/protocol.ts` with a regex. |
+
+### `net/custom.ts` (274 lines, new): **REFACTOR, small** (Phase 7)
+
+| | |
+|---|---|
+| **Current responsibilities** | The custom-lobby store: the list (watch), create, join (from the list, by code, by link), `ask` (an action as a promise), the waiting-room state, the match on the same socket (`link(socket, welcome, aside)`, then `release()`), leaving a match (Back to lobby), coming back within the grace (`comeBack`, `RETRY`, the `sessionStorage` mark), `resumeLobby` after a reload, `NOTES` (the refusals' texts). |
+| **Should remain** | The store and its state machine. |
+| **Should move** | The pieces identical to `net/matchmaking.ts`: `dial()`, the retry schedule and loop, the `sessionStorage` mark helpers. |
+| **Suggested destination** | `net/sessionSocket.ts`, shared by both stores |
+| **Reason** | The same machinery written twice. Two stores stay (§9.2). |
+| **Risk** | Medium: the repo's review fixed four bugs in this layer; `client.check` (47) and `scripts/browser-match.mjs custom` guard it. |
 
 ---
 
 ## 3. Dependency graph
 
-### 3.1 Folder-level graph (current, value + type imports)
+### 3.1 Folder-level graph (current)
 
 ```
                  main.tsx ──(dynamic import)──► App.tsx
@@ -285,82 +457,83 @@ Pure, event-sourced, heavily checked. Only change: import the shared `Life`/`Poi
               │                                   │  ▲                          │
               │                                   ▼  │ (net/client → game/*)    │
               └───────────► net/ ◄────────────────┘  │                          │
-                             │  (runtime.ts → net/connection; online.ts → net/client)
-                             └───────────────────────┘
-server/ ──► game/ (sim, modes, maps→arena builders→materials→renderer), net/protocol.ts
+               (custom.ts,  │  (runtime.ts → net/connection; online.ts → net/client)
+                matchmaking)└───────────────────────┘
+server/ ──► game/ (sim, modes, items, matchSettings, maps→arena builders→materials→renderer), net/protocol.ts
 ```
 
-### 3.2 Edges that matter
+### 3.2 Edges that matter (new or changed)
 
-| Edge | Kind | Verdict |
+| Edge | Verdict |
+|---|---|
+| `net/protocol.ts → game/matchSettings.ts` (value: `checkSettings`, `CUSTOM`) `→ game/ai.ts` (value: `DIFFICULTIES`) | **REFACTOR**: the wire format now depends on the bot AI module (and through it Rapier) just to know the difficulty names. A leaf `difficulty.ts` (pure data) fixes it. |
+| `server/custom.ts → net/protocol.ts` (value: `LOBBY_FORM`, `tidy`) and types from `game/` | **KEEP** (correct direction). After Phase 4 it imports `net/lobbyProtocol.ts`. |
+| `game/matchSettings.ts → type game/modes.ts` (`Mode`) while `modes.ts → matchSettings.ts` | **REFACTOR**: root of the type cycle (§3.4) |
+| `game/mode.ts → type game/items/supply.ts` while `supply.ts → mode.ts` (`ms`, `Feed`) | **REFACTOR**: second root (§3.4) |
+| `game/modes.ts → items/pickups.ts, ffa/zone.ts` (Three.js scenery) | **REFACTOR** (Phase 5): the server bundle carries both views |
+| `screens/Lobby.tsx → game/tdm/config.ts` (`TEAMS`), `game/roster.ts` (`botName`), `game/ai.ts` (`DIFFICULTIES`) | Fine as reads; the team-side and tally logic it re-implements moves to shared rules |
+| `screens/Results.tsx → screens/Lobby.tsx` (`Tally`), `screens/Lobby.tsx → screens/Lobbies.tsx` (`Lock`) | **KEEP** (screen-to-screen sharing; move the small shared pieces to a `screens/custom/` folder later) |
+| `hud/Hud.tsx → game/items/{config,items,supply}` | **KEEP** (generic supply readers) |
+| `game/runtime.ts → net/connection.ts`, `game/online.ts → net/client.ts` | unchanged folder inversion (Phase 6) |
+
+### 3.3 Unwanted-dependency audit
+
+| Unwanted dependency | Present? | Note |
 |---|---|---|
-| `game/runtime.ts → net/connection.ts` (value: `NetError`, `REASONS`) | runtime → net | Fine for a **runtime** module, but it sits in `game/`, which `net/` also imports → **folder inversion**. Fix by moving the runtime (Phase 5). |
-| `game/online.ts → net/client.ts` | runtime → net | Same. |
-| `net/client.ts → game/{modes,simulation,physics,combat,vehicles,drive}` | net → sim | **KEEP** (correct direction). |
-| `net/protocol.ts → game/{combat (WEAPONS), scoring (createStats), vehicles (VEHICLES), simulation (type Combatant)}` | net → sim/content | **KEEP**; the wire depends on the entity shape by design. |
-| `server/* → src/game/*`, `src/net/protocol.ts` | server → shared | **KEEP**. |
-| `server/lobby.ts, arenas.ts, main.ts → game/maps.ts → arena builders → materials/library.ts → renderer.ts` | server → visual code | Works because `library.ts` skips the GPU bake when `typeof window === 'undefined'` and `headless.ts` fakes `document`. **REVIEW**: it explains the 4.4 MB server chunk. Not a correctness bug. |
-| `game/modes.ts → ffa/pickups.ts` (Three.js scenery) | registry → visuals | **REFACTOR**: the scenery factory belongs to the client (Phase 4). |
-| `hud/Hud.tsx → ffa/config, ffa/items, ffa/rules (type), tdm/config` | UI → mode internals | By design today (narrowing on `mode.kind`); **REFACTOR** into per-mode panels (Phase 4). |
-| `hud/minimap.ts → ffa/items (ITEMS colours)` | UI → mode data | Pass marks with colours from the FFA panel (Phase 4). |
-| `screens/Results.tsx → tdm/config (TEAMS)` | UI → mode config | Per-mode results panel (Phase 4). |
-| `screens/Garage.tsx → vehicle/drive.ts` (`drivePerformance`) | UI → physics module | REVIEW: harmless (pure function). Optionally move it next to the vehicle specs. |
-| `arena/props.ts → vehicle/parts.ts` | content → content | Content cross-reference (tyres, lamps). Move `parts.ts` to a shared content location (Phase 5). |
-| `materials/library.ts → renderer.ts` | content → GPU context | Real, lazy dependency (baking). Resolve by folder placement (§4: `render/`). |
-| `feed.ts → view.ts` (type `Feedback`) | presentation ↔ presentation | KEEP. |
+| domain → React | **No** | |
+| domain → Three.js | **Maths only**, plus rendering types in the contract | `mode.ts` still has `show(camera: THREE.Camera)`; `modes.ts` still takes `THREE.Scene` |
+| domain → DOM / wall clock / `Math.random` | **No** | `Math.random` only in `match.ts` (seed pick) and presentation; `custom.ts` uses `node:crypto` for codes and salts (server-only, not gameplay) |
+| domain → WebSocket | **No** | |
+| server → client-only code | **Yes, two files** | `items/pickups.ts` and `ffa/zone.ts` ride in through `modes.ts` (bundled, never instantiated on the server); Phase 5 removes them, and §14.1 rule 2 allows them until then |
+| wire → AI | **Yes (new)** | see §3.2 |
+| page re-implements server rules | **Yes (new)** | §1.5 |
 
-### 3.3 Unwanted-dependency audit (what the brief asked for)
+### 3.4 The type-level cycle
 
-| Unwanted dependency | Present? | Evidence / note |
-|---|---|---|
-| domain → React | **No** | No `react` import under sim/modes files. |
-| domain → Three.js | **Math only**, plus 3 type-only rendering leaks | `simulation.ts`, `ai.ts`, `combat.ts` use `THREE.Vector3/Quaternion/MathUtils` as maths. **Rendering types** leak into the contract: `mode.ts` (`THREE.Camera` in `show()`), `modes.ts` (`THREE.Scene` in `ModeContext`), `ffa/mode.ts` (`THREE.Camera`). **Verdict:** keep Three.js maths (§19); remove the rendering types (Phase 4). |
-| domain → DOM | **No** | `window`/`document`/`localStorage` appear only in `settings.ts`, `loadout.ts` (in functions, try/catch), `input.ts`, `audio.ts` (**import-time**), `loading.ts`, `canvasTextures.ts`, `ground.ts` (canvas, shimmed on the server), `runtime.ts`, `turntable.ts`. |
-| domain → WebSocket | **No** | Only `net/connection.ts`, `net/matchmaking.ts` and `server/server.ts` touch sockets. |
-| domain → browser APIs (wall clock, `Math.random`) | **No** | `Math.random` only in `match.ts` (seed pick), `camera.ts`, `audio.ts`, `effects.ts` (presentation). `performance.now` only in runtime/net/server. |
-| server → client-only code | **No production edge** | `server/browser.ts` (a check helper) imports `net/client` + `net/connection`: fine for checks. Import-time hazard: nothing guards against a future import of `audio.ts`. |
-| presentation → simulation internals | **By design, read-only** | HUD reads `match.mode.rules` query methods (`standings()`, `deficit()`, `soleLeader()`…). `view.ts` reads the Rapier vehicle controller (REVIEW, §8). |
-| simulation → rendering | **No** | `SimEvents` only. |
-| gameplay → networking | **No** | Rules/sim never import `net/`. The adapters' `share`/`mirror` are plain data. |
+Value imports have no cycle. Type imports now form one strongly connected set of 14 files (`modes`, `matchSettings`, `mode`, `simulation`, `ffa/{mode,rules,zone}`, `tdm/{mode,rules,types,tactics}`, `items/{items,supply,pickups}`). Every shortest cycle runs through one of two edges:
 
-The full edge list is in [Appendix A](#appendix-a-import-graph-current).
+```
+matchSettings.ts ──type Mode──► modes.ts ──► ffa/mode.ts ──► … ──► matchSettings.ts
+mode.ts ──type Supply──► items/supply.ts ──value ms, type Feed──► mode.ts
+```
+
+Why it matters even though types are erased: (1) the mode ids live at the top of the graph (in the registry that imports every adapter and view), so any module that only needs the id type, including the plain-node `server/custom.ts`, nominally depends on everything; (2) the repo's `MODULE_BOUNDARIES.md` promises no cycles, type imports included; (3) a boundary checker cannot layer what loops. The fix is type-only (Phase 2): `Mode` ids in a leaf module, `MODES` declared with `satisfies Record<Mode, …>`; `ms`/`clock` in a leaf; the contract describes what it reads of a supply with its own small `SupplyView` type.
+
+Full edge list: [Appendix A](#appendix-a-import-graph-current).
 
 ---
 
 ## 4. Architectural layers
 
-### 4.1 What the constraints actually are
+### 4.1 The real constraints
 
-Before proposing layers, here are the **real** constraints, derived from the code rather than from a template:
+Revision 1's four stand:
 
-1. **Server-reachable code must be import-safe and call-safe in Node.** No React, no WebAudio, no `WebGLRenderer` calls, no import-time `window`/`document` use. The arena builders are the documented exception (DOM shim + headless material path).
-2. **Authoritative gameplay must not depend on presentation**, and must not read the wall clock or unseeded randomness.
-3. **React stays above the runtime.** It reads the `Match` object and never drives steps.
-4. **`net/` (client mirror) and `server/` share only `net/protocol.ts` (+ the future `net/events.ts`) and gameplay.** Never each other's transport.
+1. Server-reachable code must be import-safe and call-safe in Node (the arena builders are the documented exception: DOM shim + headless materials).
+2. Authoritative gameplay must not depend on presentation, the wall clock or unseeded randomness.
+3. React stays above the runtime.
+4. Page and server share only the wire modules and gameplay.
 
-### 4.2 Recommended layers: 7 new folders beside the existing `net/`, `screens/` and `hud/` (not 9 layers + subfolders)
+The custom work adds one more:
 
-| Layer (folder) | Purpose | Allowed imports | Forbidden imports | Current files |
+5. **Lobby rules have one home that both the server and the page import.** The server decides; the page may predict (hints, highlights) only with the same code.
+
+### 4.2 Recommended layers: 7 new folders beside `net/`, `screens/`, `hud/`
+
+| Layer (folder) | Purpose | Allowed imports | Forbidden imports | Files (today → target) |
 |---|---|---|---|---|
-| **`shared/`** | Leaf utilities used by *both* gameplay and content/view | nothing internal | anything internal | `rng.ts`; shared `Point`/`Life` types; `clock()` formatter |
-| **`content/`** | What the world *is*: vehicle/weapon **specs** (data), 3D **models/turrets**, **arenas** (builders + layout), shared parts | `shared/`, `render/` (materials, geometry), `three` | `sim/`, `modes/`, `view/`, `runtime/`, `net/`, React, audio | `arena/*`, `vehicle/{vehicles,vehicle,parts}.ts`, weapon specs from `combat.ts`, `maps.ts` registry, legacy generators |
-| **`render/`** | Shared Three.js infrastructure: the one WebGL context, the material library + GPU bake, geometry helpers, sky/sun, post-processing | `shared/`, `three` | `sim/`, `modes/`, `view/`, `runtime/`, `net/`, React | `renderer.ts`, `materials/*`, `geometry.ts`, `environment.ts`, `postprocessing.ts` |
-| **`sim/`** | Authoritative, headless gameplay: simulation, combat mechanics, physics, driving, AI, scoring, the mode **contract**, loadout type | `shared/`, `content/` **specs, types and registries only**, `three` (**maths only**), Rapier | `render/`, `view/`, `runtime/`, `net/`, React, DOM globals, `Math.random`, `Date.now`, `performance.now` | `simulation.ts`, `combat.ts` (mechanics), `physics.ts`, `vehicle/drive.ts`, `ai.ts`, `scoring.ts`, `mode.ts`, `loadout.ts` (type part) |
-| **`modes/`** | Each game mode as a feature folder (rules, adapter, tactics, config, check) + registry + roster; **client-only** files inside each mode folder, reachable only through two client registries: `modes/scenery.ts` (`MODE_SCENERY`, Three.js, view level) and `modes/views.ts` (`MODE_VIEWS`, React panels, UI level) | `sim/`, `content/`, `shared/`. Scenery files may also import `render/`; panel files may also import React and the `Match` type | domain files: same as `sim/`. `modes/scenery.ts` is imported only by `runtime/`; `modes/views.ts` only by `hud/` and `screens/` | `ffa/*`, `tdm/*`, `modes.ts`, `roster.ts` |
-| **`view/`** | The match as the local player sees, hears and controls it: view, effects, camera, audio, sounds, feed, pilot, input, settings, garage turntable | `render/`, `content/`, `sim/` (read), `modes/` (types), `shared/`, DOM, WebAudio | `runtime/`, `net/`, `screens/`, `hud/`, React | `view.ts`, `effects.ts`, `camera.ts`, `audio.ts`, `sounds.ts`, `feed.ts`, `pilot.ts`, `input.ts`, `settings.ts`, `turntable.ts` |
-| **`runtime/`** | Browser composition (the "application" layer): `startGame`, `playMatch`, the practice and online sources, loading, local persistence | everything below + `net/` | `screens/`, `hud/` (React) | `runtime.ts`, `match.ts`, `online.ts`, `loading.ts`, loadout storage |
-| **`net/`** (unchanged) | Wire protocol, codec, socket, client mirror, prediction, interpolation, matchmaking store, Nakama session, chat | `sim/`, `modes/` (domain), `content/` specs, `shared/` | `view/`, `runtime/`, `render/`, `screens/`, `hud/`. `protocol.ts` + `events.ts` must also stay **server-safe** | as today |
-| **`screens/`, `hud/`** (unchanged) | React UI | `runtime/` (Match API), registries, `modes/views.ts`, `net/matchmaking`, `net/chat`, `view/settings`, `view/turntable` | Rapier, `sim/physics`, `sim/simulation` values, `render/` (except via the turntable) | as today |
-| **`server/`** (unchanged, flat) | Authoritative server | `sim/`, `modes/` (domain), `content/`, `net/protocol.ts`, `net/events.ts`, `shared/` | `view/`, `runtime/`, `screens/`, `hud/`, `render/` **except** through `content/arenas` builders, the client parts of `net/`, React, Nakama JS | as today |
+| **`shared/`** | Leaf utilities | nothing internal | anything internal | `rng.ts`; `Point`; `ms`/`clock` formatters |
+| **`content/`** | Specs (data), 3D models/turrets, arenas, shared parts | `shared/`, `render/`, `three` | `sim/`, `modes/`, `view/`, `runtime/`, `net/`, React, audio | arenas, vehicles, weapon specs, `maps.ts` registry |
+| **`render/`** | Shared Three.js infrastructure (WebGL context, material library + bake, geometry, sky, post) | `shared/`, `three` | everything above it | `renderer.ts`, `materials/*`, `geometry.ts`, `environment.ts`, `postprocessing.ts` |
+| **`sim/`** | Authoritative headless gameplay: simulation, combat, physics, driving, AI, scoring, the mode contract, loadout type, difficulties | `shared/`, `content/` specs/types/registries, `three` (maths only), Rapier | `render/`, `view/`, `runtime/`, `net/`, React, DOM, `Math.random`, `Date.now`, `performance.now` | `simulation.ts`, `combat.ts`, `physics.ts`, `drive.ts`, `ai.ts`, `scoring.ts`, `mode.ts`, `loadout.ts`, new `difficulty.ts` |
+| **`modes/`** | **Traits and ids (leaf)**, match settings, the shared **items** module, each mode as a feature folder, the registry, the roster; client-only files (scenery, panels) reachable only through two client registries | `sim/`, `content/`, `shared/`; scenery files may import `render/`; panel files React | domain files: as `sim/` | `traits.ts` (new), `settings.ts` (today `matchSettings.ts`), `items/`, `ffa/`, `tdm/`, `index.ts` (today `modes.ts`), `roster.ts`, `scenery.ts`, `views.ts` |
+| **`view/`** | What the local player sees, hears and controls | `render/`, `content/`, `sim/` (read), `modes/` (types, traits), `shared/`, DOM, WebAudio | `runtime/`, `net/`, `screens/`, `hud/`, React | `view.ts`, `effects.ts`, `camera.ts`, `audio.ts`, `sounds.ts`, `feed.ts`, `pilot.ts`, `input.ts`, `settings.ts`, `turntable.ts` |
+| **`runtime/`** | Browser composition: `startGame`, `playMatch`, practice and online sources, loading, local persistence | everything below + `net/` | `screens/`, `hud/` | `runtime.ts`, `match.ts`, `practice.ts`, `online.ts`, `loading.ts`, `stored.ts` |
+| **`net/`** (unchanged) | Wire (`protocol.ts`, `lobbyProtocol.ts`, `events.ts`, **`lobbyRules.ts`**: server-safe), socket, client mirror, prediction, interpolation, the two stores (+ shared session helpers), Nakama session, chat | `sim/`, `modes/` (domain), `content/` specs, `shared/` | `view/`, `runtime/`, `render/`, `screens/`, `hud/` | as today + the new wire modules |
+| **`screens/`, `hud/`** (unchanged) | React UI; optional `screens/custom/` for the lobby screens | `runtime/` (Match API), registries, traits, `modes/views.ts`, `net/` stores and `lobbyRules.ts`, `view/settings`, `view/turntable` | Rapier, `sim/physics`, `sim/simulation` values, `render/` (except via the turntable) | as today |
+| **`server/`** (flat) | Authoritative server | `sim/`, `modes/` (domain), `content/`, `net/{protocol,lobbyProtocol,lobbyRules,events}.ts`, `shared/` | `view/`, `runtime/`, `screens/`, `hud/`, `render/` (except through arena builders), the stores, React, Nakama JS | as today |
 
-**Why no separate `application/`, `engine/`, `platform/` or `presentation/`:**
-
-- **`application/`**: `runtime/` *is* the application layer. The name `runtime` matches existing vocabulary (`MODULE_BOUNDARIES.md` calls it "Browser runtime"). `session/` would clash with `net/session.ts`.
-- **`engine/`**: physics, driving and the simulation cannot be separated from gameplay without a physics abstraction (rejected, §19). Hitscan, AI perception and item placement *are* Rapier queries.
-- **`platform/`**: the platform adapters are `input.ts`, `audio.ts`, `renderer.ts` and two small `localStorage` users. Each has one consumer layer. A separate folder would hold 3–4 files and add a rule without preventing any real mistake.
-- **`presentation/`**: `screens/` and `hud/` are already clean folders. Moving them gains nothing.
-
-`render/` exists (instead of folding it into `view/`) for one concrete reason: `materials/library.ts` is **server-reachable** through the arena builders, and it imports `renderer.ts`. If both lived in `view/`, the rule "server must not reach `view/`" would need an exception. [Medium confidence: the alternative is `view/` + one documented exception. Both work; `render/` states the truth about reachability.]
+**Not added**, for the same reasons as revision 1: `application/` (`runtime/` is it), `engine/` (no physics abstraction), `platform/` (3–4 files), `presentation/` (`screens/` and `hud/` are fine). One thing **is** added that revision 1 did not have: a leaf **`modes/traits.ts`**, because the custom work proved that code outside a mode folder needs a few facts about every mode (§5, §7).
 
 ---
 
@@ -368,263 +541,227 @@ Before proposing layers, here are the **real** constraints, derived from the cod
 
 Each candidate is judged on whether it solves a problem **in this codebase**.
 
-| Contract | Exists today? | Why it exists / would exist | Consumers | Implementers | Verdict |
-|---|---|---|---|---|---|
-| **`MatchMode`** | Yes (`game/mode.ts`) | The engine never asks which mode runs | `simulation.ts`, `match.ts`, `room.ts`, `net/client.ts`, HUD (via `kind`) | `ffa/mode.ts`, `tdm/mode.ts` | **KEEP**; **remove `show(camera)`** (client scenery, Phase 4); keep `share`/`mirror`. |
-| **`ModeRules`** | Yes | What the simulation drives each step | `simulation.ts`, `feed.beep`, HUD | FFA/TDM rules | **KEEP**. |
-| Mode registry entry | Yes (`MODES`) | Cards, line-up, factory | MapSelect, roster, room, lobby, client | – | **KEEP**; add **`teamPlay: boolean`** (for `room.ts` team chat; feed colours are already passed as a flag); move `createPickups` out. |
-| **`ModeViews`** (new, client-only) | No | Removes the `mode.kind` branches from `Hud.tsx`/`Results.tsx` | `hud/Hud.tsx`, `screens/Results.tsx` | `modes/ffa/{hud,results}`, `modes/tdm/{hud,results}` | **ADD (Phase 4)**. Solves a concrete problem: a third mode would otherwise edit 2 large shared files. |
-| **`ModeScenery`** (new, client-only, optional per mode) | No (`MatchMode.show` + a scenery injected through `modes.ts`) | Takes rendering out of the gameplay contract and out of the server bundle | `runtime/runtime.ts` (per frame, restart, dispose) | `modes/ffa/scenery.ts` | **ADD (Phase 4)**; a `Partial<Record<Mode, …>>` registry, because most modes have no scenery. |
-| **`VehicleSpec`** (definition) | Yes (`vehicle/vehicles.ts`) | Data for physics, garage, rewind | sim, garage, rewind, view, protocol | `ROSTER` entries | **KEEP**; move the `Handling`/`Chassis` types next to it (content), out of `drive.ts`. |
-| **`WeaponSpec`** (definition) | Yes (`combat.ts`) | Data for sim, garage, HUD, bots | many | `ROSTER` entries | **KEEP**, and **add `id`** (identity), **`turret`** (open key replacing the `model` union), **`icon`** (SVG path data), optional **`cue`** (fire sound) and optional **`ai`** style (Phase 2). |
-| **Turret builder registry** (new) | No (a ternary) | A new weapon without editing `vehicle.ts` | vehicle model builders, turntable | `content/weapons/<id>/turret.ts` | **ADD (Phase 2)**; a plain `Record<string, () => THREE.Group>`. |
-| **`Arena`** (built) + **`MapInfo`** (definition) | Yes | The map contract | sim, modes, physics, runtime, server | builders | **KEEP**. |
-| **`SimEvents`** | Yes | The sim reports; presenters present | sim | view, recorder, client playback, checks (no-ops) | **KEEP**. The wire codec (below) mirrors it. |
-| **Wire event codec** (new) | No (split) | One definition of each event's fields for encoder *and* decoder | `server/recorder.ts`, `net/client.ts` | `net/events.ts` | **ADD (Phase 3)**. |
-| **`Feed`** | Yes | Mode adapters announce to the player | adapters | `feed.ts` | **KEEP**. |
-| **`MatchSource`** | Yes | Practice vs online step source | `playMatch` | `createMatch`, `createOnlineMatch` | **KEEP**. This is the "local and online share the core" seam. |
-| **`MatchTransport`** | Effectively yes: `Link` (`take`, `send`, `status`, `close`, `onPong`) | Socket abstraction | `net/client.ts`, `online.ts` | `connection.ts link()`; checks use it in Node | **KEEP; no new interface.** |
-| **`RandomSource`** | Yes: `() => number` + `createRng` | Seeded streams | sim, ai, rules | mulberry32 | **KEEP.** A function type is the right size; an interface/class adds nothing. |
-| **`Clock`** | Partly: sim time is the `dt` argument; `matchmaker` takes a `now()` hook | – | – | – | **REJECT** a general `Clock` interface. Gameplay already has no wall clock; the matchmaker's hook covers its case. |
-| **`PhysicsWorld` / `PhysicsBody`** | No | Hypothetical engine swap | – | – | **REJECT** (§19). One engine; determinism depends on the exact Rapier call sequence; prediction replays `drive.ts` on the same Rapier. |
-| **`Audio`** | No (module functions) | – | view, feed | `audio.ts` | **REJECT.** `SimEvents` already isolates the sim from audio; headless runs never import audio. |
-| **`AssetLoader`** | No (`public/models/` does not exist yet) | glTF loading + caching + disposal | – | – | **POSTPONE** until the first glTF asset. When it lands, it needs its **own disposal rule**: glTF materials are per-asset, unlike `materials/library.ts`, which must never be disposed (§18). |
-| **`Loadout`** | Yes (ids) | Garage → match → wire | App, protocol, room, lobby | – | **KEEP**; add a pure `parseLoadout(unknown)` used by both `localStorage` restore and `parseClient` (dedupes validation). |
+| Contract | Exists? | Consumers → implementers | Verdict |
+|---|---|---|---|
+| **`MatchMode`** | Yes (`game/mode.ts`) | sim, `playMatch`, room, client, HUD → `ffa/mode.ts`, `tdm/mode.ts` | **KEEP**; remove `show(camera)` (Phase 5); keep `share`/`mirror`; replace `supply?: Supply` with `supply?: SupplyView` (what the HUD, minimap and view read), which breaks the type cycle (Phase 2) |
+| **`ModeRules`** (+ `leave`/`enter`) | Yes | sim, `feed.beep`, HUD → FFA/TDM rules | **KEEP** |
+| Mode registry entry (`MODES`) | Yes (`modes.ts`) | MapSelect, roster, room, lobby, client, lobby screens | **KEEP**; declare it over the leaf ids (`satisfies Record<Mode, …>`, Phase 2); move the scenery wiring out (Phase 5). Revision 1's proposed `teamPlay` flag becomes the `sides` trait. |
+| **`MatchSettings`** | Yes (new) | rules, roster, room, protocol, form, waiting room, records, replays | **KEEP**; move the per-mode parts (`classic(mode)`'s numbers, which sizes, whether friendly fire applies) to traits. Keep the labels beside it (the codebase keeps copy next to its data, as `VehicleSpec.blurb` does). |
+| **`ModeTraits`** (new) | No | `matchSettings` (`classic`, `checkSettings`), `server/custom.ts` (sides, free slot, regroup, slot claims, start rule, tally), `server/room.ts` (team chat), `tdm/mode.ts` (`lineUp`), screens (labels, hints), HUD/protocol/roster (`MAX_SEATS`) | **ADD (Phase 3).** Removes about 30 mode-literal lines and three duplicated rules across both sides of the wire. Not over-engineering: one small data table with consumers on the server, in the rules and in the UI. |
+| **Shared lobby rules** (new) | No (duplicated) | `server/custom.ts` (authority), `Lobby.tsx` (hints), `Results.tsx` (tally highlight) | **ADD (Phase 3)**: `sideOf`, `startable`, `tallyKey` as pure functions over the slot list both sides already have |
+| **`Supply`** | Yes (new) | FFA and TDM rules; HUD/minimap/view via `MatchMode.supply` | **KEEP**; its hooks (`wave()` shaping drops) are the right size |
+| **`SeatPlan`** | Yes (new) | roster, room, replay header | **KEEP**; add a vehicle only with Phase 8 |
+| **`LobbyHooks`** | Yes (new) | `server/custom.ts` → `server/lobby.ts`, `custom.check` | **KEEP** (the matcher's pattern) |
+| Room options for custom rooms (`lobby`, `plan`, `chat`, `over`, `idle`) | Yes (new) | `lobby.ts`, `replay.ts` → `room.ts` | **REVIEW**: group into one `custom?: { lobby, plan, chat, over, idle }` option now (no behaviour change); a `RoomKind` object only with a third kind (§10) |
+| **`VehicleSpec`** (definition) | Yes (`vehicle/vehicles.ts`) | physics, garage, rewind, view, protocol → `ROSTER` entries | **KEEP**; move the `Handling`/`Chassis` types next to it (content), out of `drive.ts` (Phase 6) |
+| **`WeaponSpec`** (definition) | Yes (`combat.ts`) | sim, garage, HUD, bots, lobby form → `ROSTER` entries | **KEEP**, and **add `id`** (identity), **`turret`** (an open key replacing the `model` union), **`icon`** (SVG path data), optional **`cue`** (fire sound) and optional **`ai`** style (Phase 2) |
+| Turret builder registry (new) | No (a ternary) | vehicle model builders, turntable → `content/weapons/<id>/turret.ts` | **ADD (Phase 2)**: a plain `Record<string, () => THREE.Group>` |
+| **`Arena`** (built) + **`MapInfo`** (definition) | Yes | sim, modes, physics, runtime, server → arena builders | **KEEP** |
+| **`SimEvents`** | Yes | sim → view, recorder, client playback, checks (no-ops) | **KEEP**; the wire codec mirrors it |
+| Wire event codec (new) | No (split) | `server/recorder.ts`, `net/client.ts` → `net/events.ts` | **ADD (Phase 4)**: one definition of each event's fields for encoder *and* decoder |
+| **`Feed`** | Yes | mode adapters → `feed.ts` | **KEEP** |
+| **`MatchSource`** | Yes | `playMatch` → `createMatch`, `createOnlineMatch` | **KEEP**: the "practice and online share the core" seam |
+| **`Link`** (+ `aside`, `release`) | Yes (`net/connection.ts`) | client, both stores, checks in Node | **KEEP**: it is the match transport and the socket-handoff seam; no separate `MatchTransport` interface |
+| `RandomSource` | Yes: `() => number` + `createRng` | sim, AI, rules, supply | **KEEP**: a function type is the right size |
+| **`Loadout`** | Yes (ids) | App, protocol, room, lobby, stores | **KEEP**; add a pure `parseLoadout(unknown)` used by both the `localStorage` restore and `parseClient` (Phase 2) |
+| `ModeViews`, `ModeScenery` (client) | No | HUD, Results, runtime → per-mode panels; FFA's hot zone | **ADD (Phase 5)**. `ModeScenery` shrinks since revision 1: the pickups view can be driven **generically** from `mode.supply`; only FFA's hot zone needs a per-mode entry (a `Partial<Record<Mode, …>>`). |
+| `Clock` | Partly: sim time is the `dt` argument; the matcher and the lobby service take `now()` | – | **REJECT** a general interface: gameplay has no wall clock, and the two hooks cover the services |
+| `PhysicsWorld` / `PhysicsBody` | No | – | **REJECT** (§19): one engine; determinism depends on the exact Rapier call sequence; prediction replays `drive.ts` on the same Rapier |
+| `Audio` | No (module functions) | view, feed | **REJECT**: `SimEvents` already isolates the sim from audio; headless runs never import it |
+| `AssetLoader` | No (`public/models/` does not exist yet) | – | **POSTPONE** to the first glTF asset. It needs its **own disposal rule**: glTF materials are per-asset, unlike `materials/library.ts`, which must never be disposed (§18). |
+
+**`ModeTraits` sketch** (pure, plain-node safe; its only imports are the mode configs):
+
+```ts
+// modes/traits.ts — what code outside a mode's folder may know about any mode.
+// The ids live here (near the bottom of the graph), so nothing needs the registry for the type.
+export const MODE_IDS = ['tdm', 'ffa'] as const
+export type Mode = (typeof MODE_IDS)[number]
+
+export interface ModeTraits {
+  sides: 0 | 2              // 0: every machine its own side; 2: two sides, the first half of the seats blue
+  sizes: readonly number[]  // line-up sizes a custom lobby may choose (today CUSTOM.sizes[mode])
+  friendlyFire: boolean     // the option means something in this mode
+  classic: { size: number; duration: number; pickups: boolean } // what Classic and practice play (today classic(mode))
+}
+
+// Each entry is a plain object declared in its own mode folder (tdm/config.ts, ffa/config.ts);
+// this file only lists and checks them. The configs import nothing from here, or the type cycle returns.
+export const MODE_TRAITS = { tdm: TDM_TRAITS, ffa: FFA_TRAITS } satisfies Record<Mode, ModeTraits>
+export const MAX_SEATS = Math.max(...MODE_IDS.flatMap((mode) => MODE_TRAITS[mode].sizes)) // 12: HUD pools, protocol SLOTS, bot names
+export const sideOf = (mode: Mode, size: number, seat: number) => (MODE_TRAITS[mode].sides ? (seat < size / 2 ? 0 : 1) : seat)
+```
+
+```ts
+// net/lobbyRules.ts — pure, server-safe; the server decides with it, the page predicts with it.
+export function startable(lobby: { mode: Mode; size: number; slots: readonly LobbySlot[] }): '' | 'alone' | 'waiting' | 'sides'
+export function tallyKey(mode: Mode, winner: number, slots: readonly LobbySlot[]): string | undefined // side, uid, or 'bot:' + slot
+```
+
+I checked the cut on today's graph: with `matchSettings.ts` taking `Mode` from such a leaf (the leaf importing only the two configs) and `mode.ts` no longer importing `items/supply.ts`, the type-level strongly connected set disappears (0 cycles). [High confidence: computed with the Appendix B script on `3b0943d`.]
 
 ---
 
 ## 6. Plug-and-play content
 
-For each content type: **today** (what a developer must touch now), then **target** (after the phases).
+For each content type: **today** (what a developer touches now), then **target**.
 
 ### 6.1 Vehicle
 
-**Today:**
-1. `vehicle/vehicles.ts`: `ROSTER` entry (handling, chassis, turret mount, armour, garage copy).
-2. A model builder + `MODELS` entry in `vehicle/vehicle.ts`. That file's layout constants read `VEHICLES.razor` at module scope, so a second vehicle needs its own builder file anyway.
-3. **Server:** `room.join` ignores the person's vehicle. `server.check.ts:365` fails on purpose once `VEHICLES` has two entries. The `ro` message and the replay `join` line carry no vehicle.
-4. **Bots:** always `BOT_VEHICLE` (`roster.ts`).
-5. **Garage:** no vehicle pager (`Garage.tsx` shows `loadout.vehicle` only).
-6. `server/arena.check.ts` checks spawn clearance against `VEHICLES.razor` shells only.
+**Today:** a `ROSTER` entry; a model builder + `MODELS` entry; and the server side is still missing: `room.join` keeps the roster's vehicle (Classic and custom alike), `server.check.ts:368` fails on purpose with two vehicles, bots use `BOT_VEHICLE`, the `SeatPlan` has no vehicle, `ro` and the journal's `join` carry none, the garage has no vehicle pager, `arena.check` checks spawn clearance with the Razor's shells only.
 
-**Target (after Phases 5 and 7):**
+**Target** (after Phases 6 and 8):
 
 ```
-Developer creates:
-    content/vehicles/<id>/spec.ts      VehicleSpec (name, kind, blurb, armour, handling, chassis, turret mount)
-    content/vehicles/<id>/model.ts     builder → THREE.Group with nodes body, turret > gun, wheel_fl/fr/rl/rr
-Registers:
-    content/vehicles/index.ts          VEHICLES: one line
-    content/vehicles/models.ts         MODELS: one line    (Record<VehicleId, …>: forgetting it is a compile error)
-Core engine changes:
-    none, once Phase 7 (a one-time capability) has landed: seats honour loadout.vehicle, bots may draw vehicles,
-    garage pager, arena.check over every vehicle's shells
-Checks that pick it up automatically:
-    simulation.check "content" (positive numbers, 4 wheels, it drives), arena.check spawn clearance (after Phase 7)
+Developer creates:  content/vehicles/<id>/{spec.ts, model.ts}
+Registers:          content/vehicles/index.ts (VEHICLES), content/vehicles/models.ts (MODELS)
+Core changes:       none, once Phase 8 (a one-time capability, PROTOCOL bump) has landed
+Custom lobbies:     optionally a `vehicles` match setting (one vehicle for everyone), as `weapons` today
 ```
-
-A new **mechanic** (tracks, jumping) is not content. It is a capability in `sim/drive.ts`/`sim/simulation.ts`, as `ARCHITECTURE.md` already states. [High confidence]
 
 ### 6.2 Weapon
 
-**Today:**
-1. `combat.ts`: `ROSTER` entry, **plus** widen the `model: 'minigun' | 'rocketPod'` union.
-2. `vehicle/parts.ts`: a turret builder, **plus** edit the ternary in `vehicle/vehicle.ts:195`.
-3. `hud/Hud.tsx`: another hard-coded SVG and `data-kind` rule.
-4. Sound: `view.ts` picks `'launch'`/`'shot'` by the `rocket` flag. Bot fighting style: `ai.ts TACTICS` picks `gun`/`rocket` by the same flag.
-5. **Bug risk:** if the new weapon reuses an existing turret model, `weaponId()` misreports it on the wire, in records and in replays.
+**Today:** `combat.ts` entry + the closed `model` union; a turret builder + the ternary in `vehicle/vehicle.ts:195`; another hard-coded HUD SVG; sound and bot style chosen by the `rocket` flag; **identity by turret model** (`protocol.ts:254`). Automatic today: the garage, bots' roster, and (new) the lobby form's weapon restriction and its label (`weaponsLabel` uses `spec.name`).
 
-**Target (after Phase 2):**
+**Target** (after Phase 2): unchanged from revision 1 —
 
 ```
-Developer creates:
-    content/weapons/<id>/spec.ts       WeaponSpec { id, name, blurb, damage, fireRate, magazine, reloadTime, range,
-                                                    spread, rocket?, turret: '<turretKey>', icon: '<svg path>',
-                                                    cue?: SoundCue, ai?: { engage, circle, keep, fire } }
-    content/weapons/<id>/turret.ts     only if it needs a new turret model
-Registers:
-    content/weapons/index.ts           WEAPONS: one line
-    content/weapons/turrets.ts         TURRETS: one line (only for a new turret model)
-Core engine changes:
-    none for a new hitscan gun or a new rocket weapon (numbers, turret, icon, sound, bot style)
-    a NEW FIRING BEHAVIOUR (beam, homing, mine) is a sim capability: a branch in simulation.fire,
-    new SimEvents/wire events (codec, Phase 3), playback, view effects. That is accepted core work, not content.
-Automatic:
-    garage lists it; bots may draw it (armBot uses the roster); HUD shows name/ammo/icon; the wire, records and
-    replays carry spec.id; rewind works for hitscan (it reads chassis shells, not weapons)
+Developer creates:  content/weapons/<id>/spec.ts (id, numbers, turret key, icon path, cue?, ai?), turret.ts if new
+Registers:          content/weapons/index.ts (WEAPONS), content/weapons/turrets.ts (TURRETS, only for a new turret)
+Core changes:       none for a hitscan gun or a rocket weapon; a new FIRING BEHAVIOUR stays sim work
+Automatic:          garage, bots, lobby restriction, HUD name/ammo/icon, wire/records/replays by spec.id
 ```
 
-### 6.3 Arena (map)
+### 6.3 Arena
 
-**Today:** already close to plug-and-play.
-1. `arena/<name>.ts`: a builder returning `Arena` (spawns, bases for TDM, zones for FFA, colliders via `solid()`, nav graph, emitters, minimap floor, `update`).
-2. `maps.ts`: a `MAPS` entry (name, preview, arrival line, `modes` hosted, `build`).
-3. `public/maps/<id>.jpg` preview.
-4. **Online:** it must build headless (no import-time `window`) and give the same digest in Node and in the browser. Add its digest to `server/digests.json`; `arena.check` enforces it.
+**Today:** builder + `MAPS` entry + preview + `digests.json`; must build headless. **New requirements from custom lobbies:** each team base needs **6** starts (TDM up to 6 v 6; `arena.check` asserts it); `arena.spawns` serves FFA lines up to 12 (`spawns[i % length]`: 16 exist on both arenas); TDM pickups need nav nodes clear of every start (`itemSpots`).
 
-**Target:** the same steps, in a feature folder:
-
-```
-Developer creates:
-    content/arenas/<id>/<id>.ts        builder → Arena (uses content/arenas/kit/*)
-    public/maps/<id>.jpg
-Registers:
-    content/arenas/index.ts            MAPS: one line (lists the modes it hosts)
-    server/digests.json                one line (arena.check prints the digest)
-Core engine changes:
-    none
-New check (Phase 1/4):
-    for every (map, hosted mode) pair: MODES[mode].lineUp(arena) and the adapter build headless
-    (today tdm/mode.ts throws at runtime for an arena without bases)
-```
+**Target:** feature folder + one `MAPS` line + one digest line. Add to `arena.check` (Phase 0/1): for every map and every mode it hosts, line up the **largest** size the mode's traits allow and build the adapter headless.
 
 ### 6.4 Game mode
 
-**Today:** a folder (`config`, pure `rules`, `mode.ts` adapter, check) + a `MODES` entry are clean, **but** you must also:
-- edit `hud/Hud.tsx` (score panel, clock/overtime, effect chips, scoreboard ordering/headers),
-- edit `screens/Results.tsx` (verdict, badge, MVP),
-- edit `server/room.ts:219` if the mode has teams (team chat),
-- add the mode to each map's `modes` list in `maps.ts` (explicit by design).
+**Today** a mode needs its folder (config, rules with `leave`/`enter` and `settings`, adapter, check) and a `MODES` entry, **and** edits in: `matchSettings.ts` (`classic`, `CUSTOM.modes`, `CUSTOM.sizes`, `checkSettings`), `server/custom.ts` (sides, free slot, regroup, slot claims, start rule, tally key), `server/room.ts` (team chat), `screens/Lobby.tsx` and `LobbyForm.tsx` (labels, hints, defaults), `screens/Results.tsx` and `hud/Hud.tsx` (panels), and each map's `modes` list.
 
-**Target (after Phase 4):**
+**Target** (after Phases 3 and 5):
 
 ```
-Developer creates:
-    modes/<id>/config.ts               tuning (durations, respawn, scoring numbers for scoring.ts)
-    modes/<id>/rules.ts                pure ModeRules implementation + its own state and events
-    modes/<id>/mode.ts                 adapter → MatchMode (lineUp, starts, plan, outcome, report→Feed, share/mirror)
-    modes/<id>/<id>.check.ts           plain-node rules check
-    modes/<id>/hud.tsx                 ModeViews.hud panel (client only)
-    modes/<id>/results.tsx             ModeViews.results panel (client only)
-    modes/<id>/scenery.ts              optional (client only)
-Registers:
-    modes/index.ts                     MODES: one line (label, tags, blurb, teamPlay, lineUp, create)
-    modes/views.ts                     MODE_VIEWS: one line (Record<Mode, …>: missing = compile error)
-    modes/scenery.ts                   MODE_SCENERY: one line, only if the mode draws scenery
-    content/arenas/index.ts            add the id to the `modes` of every map that hosts it
-Core engine changes:
-    none (simulation, playMatch, room, lobby, net/client, Hud.tsx and Results.tsx untouched)
+Developer creates:  modes/<id>/{config.ts (+ its ModeTraits), rules.ts, mode.ts, <id>.check.ts}
+                    modes/<id>/{hud.tsx, results.tsx} (client), modes/<id>/scenery.ts (optional, client)
+Registers:          modes/traits.ts (MODE_TRAITS: one line + the id in MODE_IDS)
+                    modes/index.ts (MODES: one line), modes/views.ts (MODE_VIEWS: one line)
+                    modes/scenery.ts (only if it draws something of its own)
+                    content/arenas/index.ts (add the id to each map that hosts it)
+Core changes:       none: simulation, playMatch, room, lobby, custom.ts, client, Hud.tsx, Results.tsx,
+                    Lobby.tsx and LobbyForm.tsx untouched
+Plugs in for free:  pickups (the supply), sizes, durations, respawn speed, kill limit, empty seats
 ```
 
-"Custom mode" needs a **product decision** first (see §7.5).
+### 6.5 Pickup (rewritten: pickups are now a shared module)
 
-### 6.5 Pickup (FFA item)
+**Today:** `items/items.ts` (`ItemType`, `ITEMS`, and a `GROUPS` entry: which lobby toggle turns it on), `items/config.ts` (numbers), `items/supply.ts` `apply()` (or an `Effect` key), `items/pickups.ts` token geometry (exhaustive `switch` on `ItemType`: a compile error if missed), **plus** `hud/Hud.tsx` `EFFECTS` (a hard-coded chip list) and `supply.share()` (lists the four effect keys by name).
 
-**Today** (all inside `ffa/`, except the HUD):
-- `items.ts`: `ItemType` union + `ITEMS` entry.
-- `config.ts`: weights and durations.
-- `rules.ts`: `apply()` branch (or an `Effect` key).
-- `pickups.ts`: `tokenGeometry` switch (exhaustive on `ItemType`: a compile error if missed; good).
-- `mode.ts`: `share()`/`mirror()` list the effect keys **explicitly**.
-- `Hud.tsx`: the `EFFECTS` chip list.
-
-**Target (Phase 4):** all of the above stays FFA-scoped. Two things change:
-- `share()`/`mirror()` loop over the `Effect` keys.
-- The HUD chips derive from `ITEMS` (with a `timed` flag) inside the FFA HUD panel.
+**Target** (Phase 5, small): derive the HUD chips from `ITEMS` (a `timed` flag) and loop the `Effect` keys in `share`/`mirror`.
 
 ```
-Developer creates/edits (modes/ffa/ only):  items.ts entry, config numbers, rules.apply effect, scenery token
-Core engine changes: none
+Developer creates/edits (items/ only):  ITEMS + GROUPS entry, config numbers, supply.apply, token geometry
+Core changes: none; every mode that plugs the supply in gets it
 ```
 
-**REVIEW:** do **not** promote pickups to a cross-mode system until a second mode wants them (YAGNI).
+A **new pickup group** (a fourth lobby toggle) also edits `MatchSettings.items`, `checkSettings`, `ITEM_GROUPS` (labels) and the form; that is a match-setting change (§6.9).
 
 ### 6.6 Effect (visual)
 
-**Today:** a method on the pooled particle system (`effects.ts`) + a call from `view.ts` on a `SimEvents` callback. **KEEP.** An effect registry would be over-engineering at this size. If `effects.ts` grows past a handful of new emitters, split it into `view/effects/pool.ts` + emitter files. No new contract.
+**Today:** a method on the pooled particle system (`effects.ts`) + a call from `view.ts` on a `SimEvents` callback. **KEEP.** An effect registry would be over-engineering at this size. If `effects.ts` grows past a handful of new emitters, split it into `view/effects/pool.ts` + emitter files. New code must skip absent machines, as the view now does (§8.4).
+
+```
+Developer creates/edits:  an emitter method in view/effects.ts + its call in view/view.ts (a SimEvents callback)
+Core changes:             none
+```
 
 ### 6.7 Audio
 
-**Today:** a synth function in `sounds.ts` + a `CUES`/`LOOPS` entry in `audio.ts` (a registry keyed by the `SoundCue` union) + the call site (view or feed). **KEEP.** The only addition is the optional weapon `cue` (§6.2), so a weapon's fire sound is data.
+**Today:** a synth function in `sounds.ts` + a `CUES`/`LOOPS` entry in `audio.ts` (a registry keyed by the `SoundCue` union) + the call site (view or feed). **KEEP.** The only addition is the optional weapon `cue` (§6.2), so a weapon's fire sound becomes data instead of `spec.rocket ? 'launch' : 'shot'` (`view.ts:114`).
+
+```
+Developer creates/edits:  a synth in view/sounds.ts, a CUES/LOOPS entry in view/audio.ts, the call site
+Core changes:             none
+```
 
 ### 6.8 AI behaviour
 
-- **Per mode:** the `Plan` hooks (`value`, `errand`) supplied by the adapter (`tdm/tactics.ts`, FFA's `targetValue`/`errand`). **KEEP.** This is already the plug-in point.
-- **Per difficulty:** the `DIFFICULTIES` registry. **KEEP.**
-- **Per weapon:** today `TACTICS` is picked by the `rocket` flag. **REFACTOR (Phase 2):** optional `spec.ai` style with the existing two as defaults.
-- **New bot behaviours** (e.g., item hunting in TDM) go through `Plan` first. Change `think()` only if a behaviour cannot be expressed as a target value or an errand.
+- **Per mode:** the `Plan` hooks supplied by the adapter: `value` (how much a rival is worth as a target), `errand` (where to go with nobody to fight) and, new, `careful` (friendly fire is on: hold fire rather than hit a teammate, via `clearOfMates`). **KEEP.** This is already the plug-in point.
+- **Per difficulty:** the `DIFFICULTIES` registry. **KEEP**, as a leaf data module (Phase 2): the wire format and the lobby screens import it.
+- **Per weapon:** today `TACTICS` is picked by the `rocket` flag. **REFACTOR (Phase 2):** an optional `spec.ai` style, with the existing two as defaults.
+- **New bot behaviours** (for example, item hunting in TDM now that TDM can have pickups) go through `Plan` first. Change `think()` only if a behaviour cannot be expressed as a target value, an errand or a flag.
+
+```
+Developer creates/edits:  the mode's Plan (modes/<id>/tactics.ts or its adapter); a DIFFICULTIES entry; a weapon's spec.ai
+Core changes:             none, unless the behaviour cannot be a Plan hook (then sim/ai/think.ts, with bots.check ranges)
+```
+
+### 6.9 Match setting (a custom-lobby option) — new
+
+**Today**, one option (e.g., "no respawn", "low gravity") touches: `MatchSettings` (type), `classic()`, `CUSTOM` (choices), `checkSettings`, the rules or the simulation that enforce it, `LobbyForm.tsx` (field), `Lobby.tsx` (settings line), a label helper, `protocol.check`/rules checks, and **`PROTOCOL`** (the settings travel in the welcome and the lobby view). Records and replays carry it for free (the whole object travels).
+
+**Verdict: KEEP the hand-written approach for now.** Seven options do not justify a declarative descriptor that drives validation, form and labels. Revisit if options pass about ten, or several arrive at once. [Medium confidence] The one improvement worth making now is that per-mode validity (friendly fire only with sides) comes from traits, not `mode === 'ffa'`.
+
+### 6.10 Lobby feature (spectators, map vote, …) — new
+
+A lobby feature is inherently cross-layer: a `custom.ts` action and its refusals, a `LOBBY_ACTIONS` entry and parser rule, `LobbyView` fields, a store `ask`, UI, `custom.check` cases, a `PROTOCOL` bump. That is honest work, not a leak. Two things keep it cheap: the lobby protocol in its own module (Phase 4) and the rules both sides need in `lobbyRules.ts` (Phase 3).
 
 ---
 
 ## 7. Game mode architecture
 
-### 7.1 Current (already largely correct)
+### 7.1 Current
 
 ```
-            playMatch (match.ts)              room.ts (server)            net/client.ts (online mirror)
-                    │                               │                               │
-                    ▼                               ▼                               ▼
-            createSimulation(sim) ─────────── MatchMode (contract: game/mode.ts) ◄──┘ (share/mirror, report)
-                                                    │
-                                   ┌────────────────┴────────────────┐
-                                   ▼                                 ▼
-                            ffa/mode.ts (adapter)             tdm/mode.ts (adapter)
-                                   │                                 │
-                            ffa/rules.ts (pure)               tdm/rules.ts (pure) + tactics.ts
-                                   └──────────── scoring.ts ─────────┘
+ practice: classic(mode) ─┐                          custom lobby: owner's settings ─┐
+                          ▼                                                          ▼
+          playMatch / room.ts / net/client ── MODES[kind].create({ …, settings }) ──► MatchMode (mode.ts)
+                                                                                     │      ▲ supply?
+                                                     ┌───────────────────────────────┴──────┤
+                                                     ▼                                      ▼
+                                            ffa/mode.ts (adapter)                   tdm/mode.ts (adapter)
+                                                     │                                      │
+                                            ffa/rules.ts ── items/supply.ts ── tdm/rules.ts + tactics.ts
+                                                     └─────────── scoring.ts ───────────────┘
 ```
 
-The engine (simulation, `playMatch`, room, client) reaches a mode **only through `MatchMode`**. That is the brief's "Match Engine → MatchMode → FFA/TDM", and it exists. [High confidence: verified by grep; the only `kind` checks outside the mode folders are UI and `room.ts:219`.]
+The engine still reaches a mode only through `MatchMode`, and pickups plug in through `supply` rather than through mode branches. That part is in good shape. [High confidence]
 
 ### 7.2 What leaks, and the fix
 
 | Leak | Where | Fix | Phase |
 |---|---|---|---|
-| Mode panels in shared UI | `Hud.tsx` (42 lines), `Results.tsx` (26 lines), `minimap.ts` (FFA marks) | Client-only `MODE_VIEWS: Record<Mode, ModeViews>`: `hud` (markup rendered once + `update(match)` writing its own `data-hud` slots), `results` (verdict/badge/extra panels) | 4 |
-| Rendering in the gameplay contract | `MatchMode.show(camera)`, `ModeContext.scene`, `modes.ts → createPickups` | Remove `show`. `runtime/` builds `MODE_SCENERY[kind]?.(scene)` (a separate, view-level registry, so `runtime/` never imports React panels) and calls `update(mode, camera)` each frame, `clear()` on restart, `dispose()` with the match. The FFA adapter no longer receives `scenery`. | 4 |
-| Team-play knowledge on the server | `room.ts:219` (`kind !== 'tdm'`) | `MODES[kind].teamPlay` | 4 |
-| Arena compatibility known only at runtime | `tdm/mode.ts teamBases()` throws | Keep `MAPS[id].modes` explicit. Add a check that every listed (map, mode) pair lines up headless. | 1/4 |
-| Duplicated types | `Life` ×3, `Point` ×3, `FfaPhase`/`TdmPhase` vs `ModePhase` | `shared/types.ts` (`Point`, `Life`); phases stay mode-specific but must be assignable to `ModePhase` (already enforced by `satisfies MatchMode`) | 2 |
-
-**`ModeViews` sketch** (client-only; the size is deliberate):
-
-```ts
-// modes/views.ts: client-only (UI level); Record<Mode, …> makes a missing mode a compile error.
-export interface ModeViews {
-  hud: { Panel: () => ReactNode; bind(root: HTMLElement): (match: Match) => void } // markup once; per-frame writer
-  results: (props: { match: Match }) => ReactNode                                  // verdict, badge, extra panels
-}
-export const MODE_VIEWS: Record<Mode, ModeViews> = { tdm: TDM_VIEWS, ffa: FFA_VIEWS }
-
-// modes/scenery.ts: client-only (view level, Three.js); only modes that draw something have an entry.
-export interface ModeScenery { update(mode: MatchMode, camera: THREE.Camera): void; clear(): void; dispose(): void }
-export const MODE_SCENERY: Partial<Record<Mode, (scene: THREE.Scene) => ModeScenery>> = { ffa: createFfaScenery }
-```
-
-Each panel narrows `match.mode` to its own adapter type internally, so no `if (kind === …)` remains in shared files.
-
-**Why not a HUD view model?** The previous refactor rejected one because it had a single consumer. Per-mode *panels* keep the imperative, allocation-free write pattern and put the branching where the knowledge is. [Medium confidence: it is a judgement call; a view-model is viable if the owner prefers data over components.]
+| **Per-mode facts asked directly** | `matchSettings.ts` (Classic numbers, sizes, friendly-fire validity), `server/custom.ts` (sides ×4, tally), `server/room.ts:236` (team chat), `LobbyForm.tsx`, `Lobby.tsx` | `MODE_TRAITS` (§5): `sides`, `sizes`, `friendlyFire`, `classic` | **3** |
+| **Rules written twice** | side of a slot ×3, start conditions ×2, tally key ×2, 12 seats ×5 | `sideOf`, `startable`, `tallyKey`, `MAX_SEATS` in one place each | **3** |
+| Mode panels in shared UI | `Hud.tsx`, `Results.tsx` (incl. the MVP panel), the lobby tally display | `MODE_VIEWS` (HUD panel, results panel); the tally display reads `sides` | 5 |
+| Rendering in the contract | `MatchMode.show(camera)`, `ModeContext.scene`, `modes.ts → createPickups, createHotZone` | runtime draws pickups from `mode.supply` (generic) and FFA's zone through `MODE_SCENERY` | 5 |
+| Type cycle | `Mode` from the registry; `mode.ts ↔ supply.ts` | ids in `modes/traits.ts`; `SupplyView` | 2 |
 
 ### 7.3 Where each concern lives (target)
 
 | Concern | Location | Server-reachable? |
 |---|---|---|
-| Rules (clock, phases, lives, respawn waits, protection, scoring decisions) | `modes/<m>/rules.ts` (pure) | yes |
-| Scoring (statistics, assists, streaks, combat score) | `sim/scoring.ts` (shared), numbers from `modes/<m>/config.ts` | yes |
-| Initial seating (`lineUp`) | `modes/<m>/mode.ts` | yes |
-| Respawn choice (`pickSpawn`) | `modes/<m>/rules.ts`; `starts` from the adapter; executed by `sim/simulation.ts` | yes |
-| Bot behaviour | generic `sim/ai/*` + the mode's `Plan` (`modes/tdm/tactics.ts`, FFA `targetValue`/`errand`) | yes |
-| Result (`outcome`) | adapter | yes |
-| Online state (`share`/`mirror`) | adapter | yes |
-| Feed announcements (text) | adapter's `report(feed)` | yes (no-op on the server) |
-| HUD | `modes/<m>/hud.tsx` via `MODE_VIEWS` | **no** |
-| Results screen panels | `modes/<m>/results.tsx` via `MODE_VIEWS` | **no** |
-| Scenery (pickups, zone) | `modes/<m>/scenery.ts` via `MODE_SCENERY` | **no** |
-| Configuration | `modes/<m>/config.ts` | yes |
-| Arena-screen card (label, tags, blurb) | `modes/index.ts` (plain strings) | yes (harmless) |
+| Rules, respawn choice, outcome, online state | `modes/<m>/rules.ts`, `mode.ts` | yes |
+| Match settings (type, validator, choices, labels) | `modes/settings.ts` | yes |
+| What other code may know of a mode | `modes/<m>/config.ts` traits, listed in `modes/traits.ts` | yes |
+| Pickups (catalogue, supply) | `modes/items/` | yes |
+| Pickups (tokens) | `modes/items/pickups.ts`, drawn generically by the runtime | **no** |
+| Scoring | `sim/scoring.ts`, numbers from each config | yes |
+| Bot behaviour | `sim/ai/*` + the mode's `Plan` | yes |
+| HUD, results panels | `modes/<m>/{hud,results}.tsx` via `MODE_VIEWS` | **no** |
+| Mode scenery (FFA hot zone) | `modes/ffa/zone.ts` via `MODE_SCENERY` | **no** |
+| Lobby rules (sides, start, tally) | `net/lobbyRules.ts` (reads traits) | yes |
 
 ### 7.4 Timing and phases
 
-`ModeTiming` (preMatch, finalMinute, finalPush, finalCountdown) and `ModePhase` are generic enough for the HUD clock and the countdown beeps. **KEEP.**
+Unchanged: `ModeTiming` and `ModePhase` are generic enough. **KEEP.** Respawn waits as shares of the clock (30/50/80 %) reproduce Classic's 180/300/480 s exactly; the pins guard that.
 
-### 7.5 "Custom" mode: needs a product decision
+### 7.5 "Custom": decided and built
 
-`MapSelect` shows "Custom — coming soon" (`screens/MapSelect.tsx:25`). There are two readings:
-
-- **(a) A third fixed mode** (e.g., CTF, King of the Hill): covered by §6.4.
-- **(b) Parametrised rules** (FFA/TDM with custom duration, weapons, bots): the rules **read config constants directly**. `FFA.` appears 40 times in `ffa/rules.ts` and `TDM.` 14 times in `tdm/rules.ts`. Supporting per-match config means passing `config` into `createFreeForAll`/`createTeamDeathmatch`. This is mechanical, but it touches the most-checked files. It also needs the config on the wire (the welcome) and in the replay header.
-
-**Ask the owner which one** before designing further. [Low confidence on what "Custom" means; High confidence on the cost of (b).]
+Revision 1 asked whether "Custom" meant (a) a third fixed mode or (b) parametrised rules. The owner chose **(b), plus a social layer**: Custom is a lobby flow (list, invites, waiting room) whose matches run FFA or TDM on the owner's `MatchSettings`. The rules now take settings (`settings.duration`, `respawnWait(…, settings, …)`, kill limit, friendly fire, item groups), which is exactly the config injection revision 1 estimated. A third fixed mode is still possible and is what §6.4's target describes.
 
 ---
 
@@ -636,104 +773,111 @@ Each panel narrows `match.mode` to its own adapter type internally, so no `if (k
 Gameplay state → Simulation → View adapter → Three.js
 ```
 
-**Correct, and implemented.** Combatants and the rules hold the state. `simulation.step` mutates them and reports through `SimEvents`. `view.ts` reads state each frame (`place`, `animate`) and handles events. Three.js meshes never feed back. [High confidence]
+**Correct, and implemented.** Combatants and the rules hold the state. `simulation.step` mutates them and reports through `SimEvents`. `view.ts` reads state each frame (`place`, `animate`) and handles events. Three.js meshes never feed back. The custom work kept it: empty seats are a simulation fact (`present`) that the view reads. [High confidence]
 
 ```
 React → Application/UI state → Game runtime
 ```
 
-**Correct, and implemented.** `App.tsx` holds UI choices. `GameCanvas` calls `startGame()` (runtime) and receives the `Match` object. The HUD reads `Match` every frame through an imperative handle. React never steps the game. [High confidence]
+**Correct, and implemented.** `App.tsx` holds UI choices (five `useState` values: screen, loadout, pick, seat, run). `GameCanvas` calls `startGame()` (runtime) and receives the `Match` object. The HUD reads `Match` every frame through an imperative handle. React never steps the game. The custom-lobby screens read a store (`net/custom.ts`) through `useSyncExternalStore` (`useCustom` in `screens/search.ts`), never the match. [High confidence]
 
 ### 8.2 Boundary table
 
 | Concern | Owner | Talks to | Rule |
 |---|---|---|---|
-| Simulation | `sim/simulation.ts` | Rapier, rules, `SimEvents` | No meshes, audio, DOM, wall clock |
+| Simulation | `sim/simulation.ts` | Rapier, rules, `SimEvents` | No meshes, audio, DOM or wall clock |
 | Rapier physics | `sim/physics.ts`, `sim/drive.ts` | the sim; `net/prediction.ts` drives the same `drive.ts`; `view/pilot.ts` ray-casts for aim (non-authoritative) | One world per match; creation order is part of determinism |
 | Three.js rendering | `view/view.ts` (+ `render/*`) | reads combatants; implements `SimEvents` | Never writes gameplay state |
-| React UI | `screens/`, `hud/` | `Match` object; `MODE_VIEWS` | No per-frame re-render; no physics imports |
+| React UI | `screens/`, `hud/` | the `Match` object; `MODE_VIEWS`; the two stores | No per-frame re-render; no physics imports |
 | Input | `view/input.ts` → `view/pilot.ts` → `Combatant.control` | DOM | Controls are data; the chat box stops keys (already) |
 | Audio | `view/audio.ts`, `view/sounds.ts` | view, feed | Presentation only; unseeded randomness allowed |
 | Effects | `view/effects.ts` | view | Pooled; unseeded |
+| **Empty seats** (new) | `sim/simulation.ts` (`present`, `vacate`, `occupy`), the rules (`leave`, `enter`) | rewind, recorder, client, view, HUD, minimap, scoreboard, results, bots, spawn choice | Every per-seat reader decides what an absent machine means (§8.4) |
+| **Lobby UI state** (new) | `net/custom.ts` (store) | `screens/Custom`, `Lobbies`, `Lobby`, `LobbyForm`; `App.tsx` | Rules the server decides are only *predicted* on the page, with the shared `lobbyRules.ts` (Phase 3) |
 
 ### 8.3 One REVIEW item
 
-`view.ts` reads the Rapier vehicle controller (`wheelIsInContact`, `poseWheels` from suspension length) for dust, tyre squeal and wheel poses. Online remote cars stay kinematic bodies in a local world, with `controller.updateVehicle(dt)` run only so these reads work (`net/client.ts step`). This is presentation reading the physics engine. It is acceptable while every client runs a local world. If a future client ever renders without local physics (spectator, replay viewer), wheel contacts must go into the pose data. **Postpone.** [High confidence on the mechanism]
+`view.ts` reads the Rapier vehicle controller (`wheelIsInContact`, `poseWheels` from suspension length) for dust, tyre squeal and wheel poses. Online remote cars stay kinematic bodies in a local world, with `controller.updateVehicle(dt)` run only so these reads work (`net/client.ts` `step`). This is presentation reading the physics engine. It is acceptable while every client runs a local world. If a future client ever renders without local physics (spectator, replay viewer), wheel contacts must go into the pose data. **Postpone.** [High confidence on the mechanism]
+
+### 8.4 A rule for every future feature: empty seats
+
+A machine can be out of play (`present` false). It is skipped by the simulation's loops, its body is disabled (rays, blasts and cars pass through), the rewind ignores it, the view hides it (no smoke, fire or burning loop), the page takes it out of its local world, and the HUD markers, minimap, scoreboard and results leave it out. **Any new code that iterates combatants must decide what an absent machine means** (the repo's own plan lists this as its first risk). The checks walk an empty seat through the simulation, the rules and the page; nothing enforces it for new code, so it goes into the review checklist and §18.
 
 ---
 
 ## 9. Networking architecture
 
-### 9.1 Current boundaries (mostly right)
+### 9.1 Boundaries
 
 | Concern | Module | Server-safe? | Verdict |
 |---|---|---|---|
-| Protocol (messages, quantisation, binary frame, validation, `PROTOCOL`, `BUILD`) | `net/protocol.ts` | **yes** (imported by the server) | **KEEP** (fix `weaponId`; rename its `Seat` → `SeatInfo`) |
-| Wire events codec | split: `server/recorder.ts` (encode) + `net/client.ts` (decode) | – | **REFACTOR → `net/events.ts`** (server-safe) |
-| Transport (socket, hello, `Link`, reasons) | `net/connection.ts` | runs in Node for checks | **KEEP** |
-| Replication (mirror of a server match: snapshots, state, roster, events → view/feed) | `net/client.ts` | DOM-free | **KEEP** |
-| Prediction/reconciliation | `net/prediction.ts` | DOM-free | **KEEP** |
-| Interpolation | `net/snapshots.ts` | DOM-free | **KEEP** |
-| Matchmaking (page store) | `net/matchmaking.ts` | browser (sessionStorage) | **KEEP** |
-| Identity (Nakama) | `net/session.ts` | browser | **KEEP** |
-| Chat | `net/chat.ts` + `net/chatCommand.ts` (pure) | browser / pure | **KEEP** |
-| Online `MatchSource` | `game/online.ts` | browser | **KEEP**; move to `runtime/` |
+| Protocol (messages, quantisation, binary frame, validation, `PROTOCOL`, `BUILD`) | `net/protocol.ts` | yes | **KEEP**, minus the lobby part; fix `weaponId`; keep the path |
+| Lobby protocol (types, actions, invite codes, `tidy`, `readCode`, the `lb` parser) | in `protocol.ts` today | yes | **REFACTOR → `net/lobbyProtocol.ts`** (Phase 4); `parseClient` delegates `lb` to it |
+| Lobby rules both sides use | duplicated today | yes | **ADD `net/lobbyRules.ts`** (Phase 3) |
+| Wire events codec | split | – | **REFACTOR → `net/events.ts`** (Phase 4) |
+| Transport (`Link`, `aside`, `release`) | `net/connection.ts` | runs in Node for checks | **KEEP** |
+| Replication, prediction, interpolation | `client.ts`, `prediction.ts`, `snapshots.ts` | DOM-free | **KEEP** (empty seats handled) |
+| Classic store | `net/matchmaking.ts` | browser | **KEEP** the store; share helpers |
+| Custom store | `net/custom.ts` | browser | **KEEP** the store; share helpers |
+| Identity, chat | `session.ts`, `chat.ts` (+ notes) | browser | **KEEP** |
 
-### 9.2 The codec refactor (concrete)
+### 9.2 The two stores
 
-Today, adding one `SimEvents` callback means changing:
-- `simulation.ts` (the interface + the call),
-- `view.ts` (the handler),
-- `server/recorder.ts` (`events.push(['xx', tick, …positional])`),
-- `net/client.ts` in two places (`play()` decodes `f[n]`, `mine()` decides "the player's own"),
-- and possibly `PROTOCOL`.
+Both stores open a session socket (`freshSession` → `openSocket` → `sayHello` with no map), keep a module-level state with listeners, remember a mark in `sessionStorage`, guard races with an `attempt` counter, retry on the same schedule (`[0, 1000, 2000, 4000, 7000]` ms) in a `comeBack` loop, and turn a welcome into the match's `Link`. They differ in what they mean: Classic hands the socket to the match for good; custom keeps it through the match (`aside`) and takes it back (`release`). The server enforces one session per user and "Classic or custom, not both"; the page mirrors that in `MapSelect` and `Custom.tsx`.
 
-The client's `mine()` hard-codes that the victim of `'sh'` sits at `f[11]`.
-
-**Target:** `net/events.ts` exports, per wire code:
-- the field layout (names → positions) and quantisation,
-- `encode(…)`, used by the recorder,
-- `decode(row)`, used by the client and returning a typed object,
-- `owners(row)`: the seat ids that make it "mine".
-
-A round-trip check covers every code (`protocol.check`). **Bytes on the wire must not change**, so `PROTOCOL` stays at 5; a golden snapshot-bytes fixture from Phase 0 proves it.
+**Recommendation (Phase 7):** extract `net/sessionSocket.ts` with the shared, already-identical pieces (`dial()`, the retry schedule and loop, the `sessionStorage` mark helpers). **Keep two stores**: their state machines are different, and the repo's review (`custom/LOG.md`, 2026-10-06) fixed four bugs in exactly this layer (StrictMode's double mount dropping an invite, a kicked player landing in a practice match, a reload landing on the main menu, a drop while seated leaving the store stuck). A merged "session manager" would put both flows at risk for little gain. [Medium confidence]
 
 ### 9.3 Domain vs transport
 
-The domain never touches the WebSocket (verified). Practice and online share the core through `MatchSource`:
-- practice: `sim.step` locally;
-- online: `client.receive/step/place`, where the local rules are a **mirror** (never ticked) and the local car is predicted with the same `drive.ts`.
+Unchanged: the domain never touches the WebSocket; practice and online share the core through `MatchSource`; custom matches add no new source (they are online matches with settings).
 
-**No new abstraction is needed.** [High confidence]
+### 9.4 The codec refactor (concrete)
+
+Today, adding one `SimEvents` callback means changing:
+
+- `simulation.ts` (the interface + the call),
+- `view.ts` (the handler),
+- `server/recorder.ts` (`events.push(['xx', tick, …positional])`),
+- `net/client.ts` in two places (`play()` decodes `f[n]`; `mine()` decides "the player's own"),
+- and possibly `PROTOCOL`.
+
+`mine()` hard-codes that the victim of `'sh'` sits at `f[11]` (`net/client.ts:143`). The twelve codes today: `sh`, `ln`, `rk`, `bu`, `hu`, `wr`, `cr`, `rl`, `sp`, `rc`, `ru`, `go` (unchanged by the custom work).
+
+**Target:** `net/events.ts` exports, per wire code:
+
+- the field layout (names → positions) and quantisation,
+- `encode(…)`, used by the recorder,
+- `decode(row)`, used by the client and returning a typed object,
+- `owners(row)` (a new function): the seat ids that make an event "mine", replacing the hand-written `mine()` switch.
+
+A round-trip check covers every code (`protocol.check`), and an old-vs-new table asserts that `owners()` agrees with today's `mine()` for every code. **Bytes on the wire must not change**, so `PROTOCOL` stays 6; the Phase 0 fixtures prove it.
 
 ---
 
 ## 10. Server architecture
 
-### 10.1 Current separation (already sound)
-
 | Concern | Module | Verdict |
 |---|---|---|
-| Transport + door (origins, auth, rate, strikes, backlog, hello deadline) | `server.ts` | **KEEP**; optionally extract the dev latency simulator to `netsim.ts` |
+| Transport + door (origins, auth, rate, strikes, backlog, hello deadline) and the loop | `server.ts` | **KEEP**; optionally extract the dev latency simulator to `netsim.ts` |
 | Authentication | `auth.ts` (HS256 verify/mint) | **KEEP** |
-| Matchmaking policy | `matchmaker.ts` (pure, hooks) | **KEEP** |
-| Room lifecycle and seating | `lobby.ts` | **KEEP** |
-| Match hosting (simulation) | `room.ts` | **REFACTOR, light** (journal format, input policy) |
-| Replay (write) | `room.ts` journal → `records.ts` | extract the format to `journal.ts` |
-| Replay (read/run) | `replay.ts`, `replay-main.ts` | **KEEP**; import the format from `journal.ts` |
-| Persistence | `records.ts` | **KEEP** |
-| Fair-play | `fairplay.ts` (pure) + `room.watch()` (geometry) | **KEEP** (optionally move `watch()` beside `fairplay.ts` when `room.ts` is split) |
-| Lag compensation | `rewind.ts` | **KEEP** |
+| Classic matchmaking policy | `matchmaker.ts` (pure, hooks) | **KEEP** |
+| **Custom lobbies** | **`custom.ts` (pure, hooks)** | **KEEP**; read traits and `lobbyRules.ts` (Phase 3) |
+| Rooms and who goes where | `lobby.ts` (both flows) | **REVIEW**; extract the custom hooks only if a third flow appears |
+| Match hosting (simulation) | `room.ts` | **REFACTOR, light** (journal format, input policy; group the custom options) |
+| Replay (write) | `room.ts` journal → `records.ts` | extract the format to `journal.ts` (Phase 7) |
+| Replay (read/run) | `replay.ts`, `replay-main.ts` | **KEEP**; import the format from `journal.ts`; seats a custom room's people where the journal says |
+| Persistence | `records.ts` (match records, replays, `REPLAY_DAYS` pruning) | **KEEP** |
+| Fair play | `fairplay.ts` (pure) + `room.watch()` (geometry) | **KEEP** (optionally move `watch()` beside `fairplay.ts` when `room.ts` is split) |
+| Lag compensation | `rewind.ts` (skips absent machines) | **KEEP** |
 | Headless arenas | `arenas.ts`, `headless.ts`, `digests.json` | **KEEP** |
 
-### 10.2 Folder structure
+**Folder structure: KEEP `server/` flat.** 17 production files (16 for the server plus `browser.ts`, which emulates pages for the checks), each cohesive. Subfolders would add path noise, churn `vite.server.config.ts` `ENTRIES`, and prevent no mistake. [High confidence]
 
-**KEEP `server/` flat.** 13 production files, each cohesive. Subfolders would add path noise, churn `vite.server.config.ts` `ENTRIES`, and prevent no mistake. [High confidence]
+**Room kinds.** `room.ts` now serves two kinds of room. The difference is a handful of policies: which seat a person takes, which gun they get, what happens when they leave, what follows the results, whether an empty match is abandoned, what idleness does, whether matchmaking may use the room, and what the record and journal note. Today these are `lobby ? … : …` branches. A `RoomKind` object (`{ seatFor, gunFor, onLeave, afterResults, onIdle, open }`) would make a third kind additive, but with two kinds it is an indirection the code has to be read through. **Recommendation:** group the custom options into one `custom?: { lobby, plan, chat, over, idle }` option and keep the branches next to each other; extract `RoomKind` when a third kind is on the roadmap (the repo lists stats and leaderboards for the next phase, which might bring ranked play). [Medium confidence]
 
-### 10.3 Server-specific rules for the boundary check
+**Capacity and operations (facts, not refactors):** custom matches and Classic share `MAX_ROOMS` (12) and are counted by kind; `MAX_LOBBIES` (24); `deploy/compose.yml` deliberately passes neither (podman-compose 1.3.0 would hand `${VAR:-default}` on as text), so the defaults apply. Lobbies live in memory: a deploy ends them all. Password checks (scrypt, N=1024, about 2 ms) run on the loop's one thread; the lockout (5 wrong a minute per person, then 60 s shut) and the door's rate limits bound them.
 
-- Production entries (`main.ts`, `load.ts`, `replay-main.ts`) must not reach `view/`, `runtime/`, `screens/`, `hud/`, React, Nakama JS, or `net/{connection,client,prediction,snapshots,matchmaking,session,chat}`.
-- `server/*.check.ts` and `server/browser.ts` are exempt (they emulate pages on purpose).
+**Server-specific boundary rules** are §14.1 rules 2 and 4 (reachability from `main.ts`, `load.ts`, `replay-main.ts`; the two pure services).
 
 ---
 
@@ -742,12 +886,15 @@ The domain never touches the WebSocket (verified). Practice and online share the
 | Pair | Today | Mixing? | Recommendation |
 |---|---|---|---|
 | `VehicleSpec` / `Combatant` + `Car` | Separate; the combatant holds a `vehicle` id and a `car` built from the spec | No | **KEEP** |
-| `WeaponSpec` / `WeaponState` | `WeaponState.spec` holds a spec object; **bots hold a scaled copy** (`botGun`), so the definition is mutated per instance and identity is lost | **Yes** | **REFACTOR:** `id` on the spec (copies keep it). Longer term, optionally `WeaponState { id, modifiers }`, but `id` alone fixes the defect. [High confidence] |
+| `WeaponSpec` / `WeaponState` | `WeaponState.spec` holds a spec object; **bots hold a scaled copy** (`botGun`), so the definition is copied per instance and its identity is recovered from the turret model. Custom seats get `WEAPONS[gun]` itself, and the lobby's one-gun setting goes through the same `weaponId` lookup | **Yes** | **REFACTOR:** `id` on the spec (copies keep it). Longer term, optionally `WeaponState { id, modifiers }`, but `id` alone fixes the defect. [High confidence] |
 | `MapInfo` / `Arena` | Registry entry vs built arena (immutable during play; `update()` is visual) | Layout is **derived from visual meshes** (`solid()` → `collectColliders`) | **REVIEW → postpone** (§18). For **new** maps only, allow an optional `layout()` separate from `dress()` if a map author wants it. Do not rewrite the two existing maps (digest risk). |
-| `MatchDefinition` / `MatchRuntime` | Mode config (`FFA`, `TDM` constants) + `Seat`/`Recruit` vs rules state + combatants | No | **KEEP** (see §7.5 if Custom = parametrised) |
-| `Loadout` (ids) / armed combatant | ids resolved in `createMatch`/`room.join` | No | **KEEP**; add `parseLoadout` |
-| `Skill` (difficulty) / `Brain` | Separate | No | **KEEP** |
-| `ITEMS` / live `Item` | Catalogue vs rules' live items | No | **KEEP** |
+| Mode config (`FFA`, `TDM` constants) + **`MatchSettings`** / rules state + combatants | Config and settings are read; the rules own their state | No | **KEEP**. Revision 1's question (config injection for parametrised rules) is answered: the rules now take `settings`. |
+| **`MatchSettings`** (how a match is played) / rules state (new) | Settings are read, never written, by the rules; they travel in the welcome, the replay header and the record | No | **KEEP** |
+| `Loadout` (ids) / armed combatant | ids resolved in `createMatch` / `room.join` | No | **KEEP**; add `parseLoadout` (Phase 2) |
+| `Skill` (difficulty) / `Brain` | Separate | No | **KEEP**; `Skill` and `DIFFICULTIES` to a leaf (Phase 2) |
+| `ITEMS` + `GROUPS` (catalogue) / `supply` items and effects | Catalogue vs the supply's live items and timed effects | No | **KEEP** |
+| `Lobby` (server state, with secrets) / `LobbyRow`, `LobbyView` (wire projections) (new) | The list's rows carry no code, password or user id; the members' view carries the code, never the password | No | **KEEP** |
+| `SeatPlan` (who sits where) / `Combatant.present` (in play now) (new) | The plan is fixed at the start; `present` changes as people leave and come back | No | **KEEP** |
 
 ---
 
@@ -755,71 +902,75 @@ The domain never touches the WebSocket (verified). Practice and online share the
 
 | Registry | Location | Keyed by | Verdict |
 |---|---|---|---|
-| `VEHICLES` | `vehicle/vehicles.ts` | `VehicleId` (`keyof ROSTER`) | **KEEP** plain record; move to `content/vehicles/index.ts` with per-vehicle files |
+| `VEHICLES` | `vehicle/vehicles.ts` | `VehicleId` (`keyof ROSTER`) | **KEEP** plain record; move to `content/vehicles/index.ts` with per-vehicle files (Phase 6) |
 | `MODELS` | `vehicle/vehicle.ts` | `VehicleId` | **KEEP**; own file `content/vehicles/models.ts` (client + headless-safe) |
-| `WEAPONS` | `combat.ts` | `WeaponId` | **KEEP**; move to `content/weapons/index.ts`; add `id` |
-| `TURRETS` | *(missing: ternary)* | turret key | **ADD** |
-| `MAPS` | `maps.ts` | `MapId` | **KEEP**; move to `content/arenas/index.ts`; `loadArena` cache → `runtime/` |
-| `MODES` | `modes.ts` | `Mode` | **KEEP**; drop the scenery wiring; add `teamPlay` |
-| `MODE_VIEWS` | *(missing: branches in HUD/Results)* | `Mode` | **ADD** (client-only, UI level) |
-| `MODE_SCENERY` | *(missing: `createPickups` wired inside `modes.ts`)* | `Mode` (partial) | **ADD** (client-only, view level) |
-| `DIFFICULTIES` | `ai.ts` | `Difficulty` | **KEEP** |
-| `ITEMS` | `ffa/items.ts` | `ItemType` | **KEEP** |
+| `WEAPONS` | `combat.ts` | `WeaponId` | **KEEP**; add `id` (Phase 2); move to `content/weapons/index.ts` (Phase 6) |
+| `TURRETS` | *(missing: a ternary)* | turret key | **ADD** (Phase 2) |
+| `MAPS` | `maps.ts` | `MapId` | **KEEP**; move to `content/arenas/index.ts`; the `loadArena` cache → `runtime/` (Phase 6) |
+| `MODES` | `modes.ts` | `Mode` | **KEEP**; declare with `satisfies Record<Mode, …>` over the leaf ids (Phase 2); drop the scenery wiring (Phase 5) |
+| **`MODE_TRAITS`** | *(missing: `'tdm'`/`'ffa'` comparisons)* | `Mode` | **ADD** (Phase 3) |
+| `MODE_VIEWS` | *(missing: branches in HUD/Results)* | `Mode` | **ADD** (client-only, UI level, Phase 5) |
+| `MODE_SCENERY` | *(missing: `createHotZone` wired inside `modes.ts`)* | `Mode` (partial) | **ADD** (client-only, view level, Phase 5); only FFA's hot zone needs it now, since pickups are drawn generically from `mode.supply` |
+| `DIFFICULTIES` | `ai.ts` | `Difficulty` | **KEEP**; move to a leaf data module (Phase 2) |
+| `ITEMS`, `GROUPS`, `SUPPLY` | `items/` | `ItemType`, group | **KEEP** |
+| `CUSTOM` (the owner's choices) | `matchSettings.ts` | – | **KEEP**; `CUSTOM.sizes` and the friendly-fire rule come from traits (Phase 3) |
+| `LOBBIES` (lobby service numbers) | `server/custom.ts` | – | **KEEP** (the matcher's `MATCHMAKING` pattern) |
 | `CUES`/`LOOPS` | `audio.ts` | `SoundCue` | **KEEP** |
 | `LIVERIES`, `QUALITY`, `FACADES` | various | – | **KEEP** |
 
-**Why plain records and not a `register()` API:** `Record<Id, …>` makes a missing entry a **compile error**. It needs no import-order or side-effect-import tricks, and it survives both Vite bundles and plain-node checks unchanged. Self-registering modules (`registry.add(...)` at import time) would depend on import order and tree-shaking, and could silently drop content from the server bundle. **"Feature folder + one explicit line in an index file" is the right design.** [High confidence]
+**Why plain records and not a `register()` API:** `Record<Id, …>` makes a missing entry a **compile error**. It needs no import-order or side-effect-import tricks, and it survives both Vite bundles and the plain-node checks unchanged. Self-registering modules (`registry.add(...)` at import time) would depend on import order and tree-shaking, and could silently drop content from the server bundle. **"Feature folder + one explicit line in an index file" is the right design.** [High confidence]
 
-Adding content therefore touches **the feature folder + 1–2 registry lines + (maps only) `digests.json`**. It never touches the engine.
+Adding content therefore touches **the feature folder + 1–2 registry lines (+ the traits line for a mode; + `digests.json` for a map)**. It never touches the engine.
 
 ---
 
 ## 13. Testing architecture
 
-### 13.1 Keep the convention
+### 13.1 The convention: keep it
 
-Plain-node `.check.ts` files (Node's type stripping, `.ts` import extensions) + Vite-bundled server checks. **Do not adopt Vitest/Jest.** The suite is fast, dependency-free and matches `AGENTS.md`. Vitest sits unused in `devDependencies`: **REVIEW**, the owner decides whether to remove it. [High confidence]
+Plain-node `.check.ts` + Vite-bundled server checks. No Vitest/Jest (Vitest remains installed and unused: owner's call). [High confidence]
 
-### 13.2 Existing checks: keep or move
+### 13.2 What exists now
 
-| Check | Covers | Keep? | Moves to (Phase 5) |
-|---|---|---|---|
-| `game/ai.check.ts` (20 lines) | router | keep | `sim/ai/ai.check.ts` |
-| `game/bots.check.ts` | bot behaviour ranges on a headless yard | keep | `sim/ai/bots.check.ts` |
-| `game/ffa/ffa.check.ts` (143) | FFA rules | keep | `modes/ffa/` |
-| `game/tdm/tdm.check.ts` (163) | TDM rules + tactics | keep | `modes/tdm/` |
-| `game/simulation.check.ts` (28) | both modes through the real sim; same-process determinism; content numbers | keep | `sim/` |
-| `game/loading.check.ts` (23) | loading runner | keep | `runtime/` |
-| `net/protocol.check.ts` (70) | wire round trips, binary frame, input rules | keep; **extend** with the codec round trip + golden bytes | stays |
-| `net/chat.check.ts` (14) | chat command parsing | keep | stays |
-| `server/matchmaker.check.ts` (63) | matchmaking on a manual clock | keep | stays |
-| `server/fairplay.check.ts` (10) | fair-play signals | keep | stays |
-| `server/arena.check.ts` (64) | both arenas headless + digests | keep; **extend** with the (map × hosted mode) matrix and every vehicle's shells | stays |
-| `server/server.check.ts` (133) | real server, sockets, authority, replay equality, room = practice | keep | stays |
-| `server/client.check.ts` (32) | headless pages through `net/` | keep | stays |
-| `server/netplay.check.ts` (33) | prediction, interpolation, lag compensation under latency | keep (timing-dependent: range asserts only) | stays |
+| Check | Count (rev 1 → rev 2) | What the custom work added |
+|---|---|---|
+| `ai.check` | router | – |
+| `bots.check` | 21 → 21 | – (kills a minute unchanged: 7.8 / 13.8 / 17.8) |
+| `ffa.check` | 143 → 152 | respawn bands as shares, kill limit, ammo alone, every pickup off, own rocket |
+| `tdm.check` | 163 → 182 | friendly-fire credit, team kills, overtime team kill, kill limit, slow respawn, `clearOfMates`, empty seat |
+| `simulation.check` | 28 → 58 | sizes 2 and 12, clock length, friendly fire, own rocket, TDM pickups, empty seat, **2 golden pins (yard)** |
+| `loading.check` | 23 | – |
+| `protocol.check` | 70 → 90 | settings validator, every lobby message's rules, presence round trip, Classic rows unchanged, `readCode` |
+| `chat.check` | 14 | – |
+| `matchmaker.check` | 63 | – |
+| **`custom.check`** | new, 71 | every lobby action and refusal, sides, owner hand-off, grace, idle close, caps, codes, passwords and lockout, bans, the tally, a list without secrets |
+| `fairplay.check` | 10 | – |
+| `arena.check` | 64 → 72 | six starts a base, all clear; new digests |
+| `server.check` | 133 → 166 | **4 golden pins (real arenas)**, custom rooms (seat plan, empty seats, end to the lobby, abandonment, replay to the bit), custom lobbies over real sockets, idle minute → waiting room, no secrets in logs |
+| `client.check` | 32 → 47 | the custom store headless: create, join by code, start, Back to lobby, the end, drops, reloads, too late, invite link, kicked |
+| `netplay.check` | 33 → 33 | – |
 
-### 13.3 New checks
+### 13.3 What is still missing
 
-| New check | Why (concrete gap) | Type | Phase |
-|---|---|---|---|
-| **Golden fingerprints** (`server/golden.check.ts`, bundled because it needs the real arenas) | Nothing pins gameplay **across commits** today. Run bots-only, each mode × each arena, fixed seed, 60 s; hash poses (mm), hulls, stats, the rules' events and recorded wire events; compare with committed constants. Also run one practice-style simulation (no room) to pin the `createMatch` path. | bundled | **0** |
-| **Golden wire bytes** (in `protocol.check`) | Moving/refactoring protocol code must not change bytes: fix a combatant state, pack a snapshot, a welcome and an input, compare with committed bytes/strings. | node | **0** |
-| **Boundaries check** (`game/boundaries.check.ts`) | Enforce §4 mechanically (§14). | node | **1** |
-| **Registry consistency** | `WEAPONS[k].id === k`; every `spec.turret` exists in `TURRETS`; every map's `modes` entries line up headless; `MODE_VIEWS` completeness (compile-time via `Record`) | node + bundled | **2 / 4** |
-| **Wire events round trip** | every `SimEvents` code encodes/decodes to the same values; `owners()` agrees with the old `mine()` table | node | **3** |
-| **Input policy** (`server/inputs.check.ts`) | queue/drain/stale behaviour in isolation (today only covered end-to-end) | node | **6** |
-| **Replay fixture** (optional) | A committed, short room journal (~KBs) with joins/leaves and human inputs, plus its expected records: proves `replay.ts` + `journal.ts` stay compatible across refactors. Must be re-pinned (in a separate commit) whenever gameplay changes on purpose. | bundled | 0 (optional) |
+| New check | Why | Phase |
+|---|---|---|
+| **Golden wire fixtures** in `protocol.check` | Pins hash end-of-match *state*; nothing pins *bytes*. Fix a combatant (and an absent one), pack a snapshot frame; serialise a welcome with settings, a `ro`, an input, a `LobbyRow`/`LobbyView`; compare with committed fixtures. Phases 2 and 4 move wire code. | **0** |
+| **A pin for non-Classic settings** | Custom options are checked by assertions, not pinned: a refactor could change how a 12-seat friendly-fire TDM with pickups plays without failing anything. One whole match: TDM, 12 seats, friendly fire, all pickups, kill limit 25, fast respawn, one seat emptied and taken mid-match; and FFA at 2 seats, pickups off. | **0** |
+| **Boundaries check** with ratchets | §14 | **1** |
+| **Every `.check.ts` actually runs** | The repo's review found claimed checks that did not exist. A rule in `boundaries.check`: every `*.check.ts` file is invoked by `npm run check` / `server:check` (and bundled ones are in `vite.server.config.ts` `ENTRIES`). Cheap, and it turns "the log says" into "the script runs". | **1** |
+| Map × mode matrix at the largest size | `arena.check`: every hosted mode lines up at its largest traits size and builds headless | 1 |
+| Traits consistency | `MAX_SEATS` equals `SLOTS`, HUD pools and `BOT_NAMES.length`; `CUSTOM.sizes` equal traits | 3 |
+| Lobby rules parity | `startable`/`tallyKey`/`sideOf` against the cases `custom.check` already drives | 3 |
+| Codec round trip | Every wire event code encodes and decodes to itself; `owners()` agrees with today's `mine()` (§9.4) | 4 |
+| `inputs.check` | The input queue policy (drain window, stale → neutral, repeats and drops) once it is its own module | 7 |
 
-### 13.4 How determinism and replay testing fit
+### 13.4 The flaky timing case
 
-- **Same-process determinism** (existing): catches nondeterminism, such as a stray `Math.random` or Map iteration order.
-- **Golden fingerprints** (new): catch *behaviour change*, such as a reordered RNG draw, a changed constant, a reordered body creation or a moved step.
-- **Room = practice** (existing, server.check): catches drift between the server path and the practice path.
-- **Replay equality** (existing, server.check): the journal replays to identical records within a build.
-- **Arena digests** (existing): layout parity across builds and machines.
+`netplay.check`'s rough-link case ("the queue is back to 1 within about a second after a stall's burst") measures wall-clock time with real sockets and timers. The repo's log records it failing in several runs on a loaded machine (1.1–3.9 s against a ~1 s bound) and passing in others; it passed in my run (676 ms). **Do not skip it.** Recommended (Phase 7, Medium confidence): measure the drain in server **steps** rather than milliseconds (the server's loop is fixed-step), or drive the latency simulator's clock by hand as `matchmaker.check` does. Until then, a red netplay run on CI needs one look at this case before anything else.
 
-**Caveat on the golden hashes:** they depend on Rapier's WASM (the same binary everywhere, so IEEE-deterministic) and on V8's `Math.sin/cos/atan2/exp/hypot`. V8's implementations are software ports and consistent across platforms in practice. A **Node/V8 upgrade** or a **Rapier upgrade** may legitimately change the hashes. **Needs verification in Phase 0:** run the golden check on CI (Node 24) and on one developer machine (e.g., Node 22 on macOS ARM), and confirm the hashes match. If they differ by platform, pin per platform or fall back to tolerance-based fingerprints. [Medium confidence]
+### 13.5 Determinism and replay
+
+Unchanged layers, now stronger: same-process determinism; **whole-match pins across commits (done)**; room = practice; replay equality (now including custom rooms with seat plans); arena digests. Cross-machine stability of the pins is now shown (macOS arm64 Node 26.7 and 24.21 by the repo; Linux x64 Node 22.22 by me). A Rapier or V8 upgrade may still legitimately move them: re-pin in a separate commit with the reason, as the repo did. [High confidence]
 
 ---
 
@@ -828,136 +979,162 @@ Plain-node `.check.ts` files (Node's type stripping, `.ts` import extensions) + 
 | Option | Enforces | Cost | Verdict |
 |---|---|---|---|
 | **TypeScript path aliases** (`@sim/…`) | nothing by itself (cosmetic) | **Breaks the plain-node checks**: Node's type stripping does not resolve `tsconfig` paths without a loader | **Reject** [High confidence] |
-| **oxlint `no-restricted-imports` + `overrides`** | per-folder import bans | Config only. The installed oxlint (1.85) has `overrides` in its schema. **Rule support needs verification.** It cannot express "reachable from the server entry" (transitive) or "no `Math.random` in sim". | **Optional complement** (Medium) |
-| **dependency-cruiser** | full graph rules | A new dev dependency + config DSL; the repo's rules favour no new dependencies | **Reject for now** (Medium) |
+| **oxlint `no-restricted-imports` + `overrides`** | per-folder import bans | Config only. The installed oxlint (1.85) has `overrides` in its schema; **rule support needs verification.** It cannot express "reachable from the server entry" (transitive), "no `Math.random` in sim", or a ratchet. | **Optional complement** (Medium) |
+| **dependency-cruiser** | full graph rules | A new dev dependency + a config DSL; the repo's rules favour no new dependencies | **Reject for now** (Medium) |
 | **Separate packages/workspaces** | hard boundaries | Breaks the one-package Vite setup, the build id, the shared server bundle and the checks | **Reject** [High confidence] |
 | **Per-layer `tsconfig` projects** (e.g., `sim` without the DOM lib) | compile-time "no DOM in sim" | `@types/three` references DOM types; `skipLibCheck` may make it workable. **Needs a spike.** | **REVIEW (optional, later)** (Low) |
-| **Custom node check** (`boundaries.check.ts`) | folder/file rules, **transitive reachability** from server entries, banned globals per folder, 0 cycles | About 150 lines, no dependency; runs in `npm run check` | **Recommend** [High confidence on need, Medium on exact mechanism] |
+| **Custom node check** (`boundaries.check.ts`) | folder/file rules, **transitive reachability** from server entries, banned globals per folder, cycles, **ratchets**, "every check runs" | A few hundred lines at most, no dependency; runs in `npm run check` | **Recommend** [High confidence on the need; Medium on the exact mechanism] |
 
-### 14.1 Rules for `boundaries.check.ts`
+The custom work strengthens the case for a check over prose: the repo's own review found agent-written log entries describing checks that did not exist (§0.2, row 2). A rule that the script runs cannot be claimed into existence.
 
-These are written for the **target** folders. Before Phase 5 the same rules are expressed as explicit file lists.
+### 14.1 Rules
 
-1. **No import cycles** (value or type). Today: 0.
-2. **Server reachability:** from `server/{main,load,replay-main}.ts`, the transitive closure excludes `view/**`, `runtime/**`, `screens/**`, `hud/**`, `modes/*/{hud,results,scenery}.*`, `modes/views.ts`, `modes/scenery.ts`, `net/{connection,client,prediction,snapshots,matchmaking,session,chat}.ts`, `react*`, `@heroiclabs/*`.
-3. **Gameplay purity:** files under `sim/**`, `shared/**` and `modes/**` (excluding client-only files and `*.check.ts`) must not import `render/**`, `view/**`, `runtime/**`, `net/**`, React, or `three/examples/**`. Their source must not contain `Math.random(`, `Date.now(`, `performance.now(`, `window.`, `document.` or `localStorage`.
-4. **Layer direction** (folder pairs from §4.2).
-5. **UI physics ban:** `screens/**` and `hud/**` must not import `@dimforge/rapier3d-compat`, `sim/physics`, or `sim/simulation` values (types are allowed).
-6. **Import-time safety list:** modules with import-time browser side effects (today `view/audio.ts`) may only be reached from `view/`, `runtime/`, `screens/`, `hud/`.
+Written for the target folders; before Phase 6 they are explicit file lists. Each rule below passes on today's code, with the allowances named (I checked each against the `3b0943d` graph).
 
-It should print a readable table of violations. **Phase 1** lands it passing against today's code (§16). [High confidence on today's state: I ran the equivalent graph queries.]
+1. **No value-import cycles** (today: 0). **Type-level cycles: a ratchet**: today 1 strongly connected set of 14 files; the number may only go down (Phase 2 takes it to 0).
+2. **Server reachability:** from `server/{main,load,replay-main}.ts`, the value-import closure excludes `view/**`, `runtime/**`, `screens/**`, `hud/**`, client-only mode files (`modes/views.ts`, `modes/scenery.ts`, `modes/*/{hud,results}.tsx`, `modes/items/pickups.ts`, `modes/ffa/zone.ts`), `net/{connection,client,prediction,snapshots,matchmaking,custom,session,chat,sessionSocket}.ts`, React and Nakama JS. **Allowance until Phase 5:** `items/pickups.ts` and `ffa/zone.ts`, which the server reaches today through `modes.ts`. `server/*.check.ts` and `server/browser.ts` are exempt (they emulate pages on purpose).
+3. **Gameplay purity:** `sim/**`, `shared/**` and the domain files of `modes/**` (not `*.check.ts`, not scenery or panels) must not import `render/**`, `view/**`, `runtime/**`, `net/**`, React or `three/examples/**`, and their source must not contain `Math.random(`, `Date.now(`, `performance.now(`, `window.`, `document.` or `localStorage`. **Allowance until Phase 2:** `loadout.ts` (its `localStorage` restore moves to `runtime/stored.ts`).
+4. **Pure services:** `server/matchmaker.ts` and `server/custom.ts` must not import `ws`, `node:http`, `node:net`, `room.ts` or `lobby.ts`, and must not call `setTimeout`/`setInterval` (they take a clock). Both pass today.
+5. **Mode literals: a ratchet.** Outside `modes/<mode>/` (today `game/ffa/`, `game/tdm/`), the traits module and the registry, a line comparing against `'tdm'`/`'ffa'` is counted per file; the counts may only go down. Today: `LobbyForm.tsx` 8, `Lobby.tsx` 7, `matchSettings.ts` 6, `server/custom.ts` 6, `Hud.tsx` 4, `Results.tsx` 2, `room.ts` 1 (34 in all; `maps.ts`' data lists and `App.tsx`'s default pick are allowed). After Phase 3 the server files reach 0; after Phase 5 the HUD and results reach 0.
+6. **UI physics ban:** `screens/**` and `hud/**` import no Rapier, no `sim/physics`, no `sim/simulation` values (types are allowed).
+7. **Import-time safety:** modules with import-time browser side effects (today `audio.ts`, which runs `window.addEventListener` at import) are reachable only from `view/`, `runtime/`, `screens/`, `hud/`.
+8. **Every `*.check.ts` runs:** each one is invoked by `npm run check` or `server:check`, and each bundled one is in `vite.server.config.ts` `ENTRIES`. Today all 15 are.
+9. **Invariants as code:** `RATE.step * PHYSICS_STEP === 1`; `MAX_SEATS` equals `SLOTS`, the HUD pools and `BOT_NAMES.length` (from Phase 3).
+10. **Layer direction:** a module imports from its own level or lower (§4.2, §20). Before Phase 6 this is the file-list form of rules 2, 3 and 6; after it, folder globs.
+
+A ratchet is a small object in the check file (`{ 'src/screens/Lobby.tsx': 7, … }`): a file over its count fails; a file under it prints "lower the allowance". It lets the check land **enforcing** on today's code without a big cleanup first. The check should print a readable table of violations, and must handle `export … from` and dynamic `import()` (today only `main.tsx → App`).
 
 ---
 
 ## 15. File-by-file migration map
 
-Legend: **keep** = no change · **move** = `git mv` + import paths only · **split** = content divided · **edit** = behaviour-preserving change in place · **new** = created. "Phase" refers to §16. Paths are relative to `game/src/` unless they start with `server/`.
+Legend: **keep** · **move** (`git mv` + import paths) · **split** · **edit** (behaviour-preserving) · **new**. Phases refer to §16. Paths are under `game/src/` unless they start with `server/`.
 
 ### 15.1 Simulation core → `sim/`, `shared/`
 
 | Current | Proposed | Action | Phase | Reason |
 |---|---|---|---|---|
-| `game/simulation.ts` | `sim/simulation.ts` | move | 5 | Authoritative core; unchanged content |
-| `game/combat.ts` | `sim/combat.ts` (WeaponState, armWeapon, pullTrigger, Shot, scatterAim, castRound, sustainedDps) + `content/weapons/{types,index}.ts` + `content/weapons/{minigun,rocketPod}/spec.ts` | edit (2: `id`, `turret`, `icon`) → split (5) | 2, 5 | Definitions vs mechanics; identity fix |
-| `game/physics.ts` | `sim/physics.ts` | move | 5 | – |
-| `game/vehicle/drive.ts` | `sim/drive.ts`; the `Handling`/`Chassis` types → `content/vehicles/types.ts` | move + type split | 5 | The driving model is sim; specs are content |
-| `game/rng.ts` | `shared/rng.ts` | move | 5 | Used by sim, content and view |
-| `game/scoring.ts` | `sim/scoring.ts` | move | 5 | – |
-| `game/mode.ts` | `sim/mode.ts` | edit (4: drop `show`) → move (5) | 4, 5 | The contract belongs with its main consumer (the simulation) |
-| (duplicates of `Life`, `Point`) | `shared/types.ts` | new (type-only) | 2 | Dedupe `mode.ts`/`ffa/rules.ts`/`tdm/types.ts`/`ffa/items.ts` |
-| `game/loadout.ts` | `sim/loadout.ts` (type, default, `parseLoadout`) + `runtime/stored.ts` (`savedLoadout`, `saveLoadout`) | split | 2 | Pure validation shared with `parseClient`; storage is browser-only |
-| `game/ai.ts` | `sim/ai/{skill,brain,perception,navigation,think}.ts` | move (5) → split (6) | 5, 6 | Five responsibilities; watch RNG order |
-| `game/ai.check.ts`, `game/bots.check.ts` | `sim/ai/` | move | 5 | Tests follow their subject |
-| `game/simulation.check.ts` | `sim/` | move | 5 | – |
+| `game/simulation.ts` | `sim/simulation.ts` | move | 6 | Authoritative core |
+| `game/combat.ts` | `sim/combat.ts` + `content/weapons/{types,index}.ts` + per-weapon `spec.ts` | edit (2) → split (6) | 2, 6 | Identity; definitions vs mechanics |
+| `game/physics.ts`, `game/vehicle/drive.ts` | `sim/physics.ts`, `sim/drive.ts` (types → `content/vehicles/types.ts`) | move | 6 | |
+| `game/rng.ts` | `shared/rng.ts` | move | 6 | |
+| `game/scoring.ts` | `sim/scoring.ts` | move | 6 | |
+| `game/mode.ts` | `sim/mode.ts` (no `show`, `SupplyView`; `ms`/`clock` → `shared/`) | edit (2, 5) → move (6) | 2, 5, 6 | Contract; cycle fix |
+| `Point` ×3 | `shared/types.ts` | new (type-only) | 2 | Dedupe |
+| `game/ai.ts` `DIFFICULTIES` | `sim/difficulty.ts` (pure data) | split | 2 | The wire must not import the AI |
+| `game/ai.ts` (rest) | `sim/ai/{brain,perception,navigation,think}.ts` | move (6) → split (7) | 6, 7 | Responsibilities; RNG order |
+| `game/loadout.ts` | `sim/loadout.ts` + `runtime/stored.ts` | split | 2 | Pure parse shared with `parseClient` |
+| checks | follow their subject | move | 6 | |
 
 ### 15.2 Modes → `modes/`
 
 | Current | Proposed | Action | Phase | Reason |
 |---|---|---|---|---|
-| `game/modes.ts` | `modes/index.ts` (domain registry + `teamPlay`) + `modes/views.ts` (client UI) + `modes/scenery.ts` (client 3D) | split | 4, 5 | The server bundle stops pulling scenery; mode UI plugs in |
-| `game/roster.ts` | `modes/roster.ts` | move | 5 | Depends on `MODES` + bot arming |
-| `game/ffa/{config,items,rules,mode}.ts`, `ffa.check.ts` | `modes/ffa/…` | move (+ `share` effects loop, 4) | 4, 5 | Feature folder |
-| `game/ffa/pickups.ts` | `modes/ffa/scenery.ts` | move + rename; client-only | 4 | Out of the adapter; into `MODE_SCENERY` |
-| – | `modes/ffa/hud.tsx`, `modes/ffa/results.tsx` | new (extracted from `Hud.tsx`/`Results.tsx`) | 4 | Per-mode panels |
-| `game/tdm/{config,types,rules,tactics,mode}.ts`, `tdm.check.ts` | `modes/tdm/…` | move | 5 | Feature folder |
-| – | `modes/tdm/hud.tsx`, `modes/tdm/results.tsx` (MVP) | new (extracted) | 4 | Per-mode panels |
+| – | `modes/traits.ts` (ids, `MODE_TRAITS`, `MAX_SEATS`, `sideOf`) | new | 2 (ids), 3 (traits) | Leaf ids break the cycle; traits replace mode literals |
+| `game/matchSettings.ts` | `modes/settings.ts` | edit (3: traits) → move (6) | 3, 6 | Per-mode parts from traits |
+| `game/modes.ts` | `modes/index.ts` (+ `satisfies Record<Mode, …>`) + `modes/views.ts` + `modes/scenery.ts` | split | 2, 5, 6 | Ids out; client registries |
+| `game/roster.ts` | `modes/roster.ts` (`BOT_NAMES` sized by `MAX_SEATS`, checked) | move | 6 | |
+| `game/items/{config,items,supply}.ts` | `modes/items/…` | move (+ `share` effects loop, 5) | 5, 6 | Shared by modes |
+| `game/items/pickups.ts` | `modes/items/pickups.ts` (client-only; drawn generically from `mode.supply`) | move + edit | 5, 6 | Out of the registry |
+| `game/ffa/{config,rules,mode}.ts`, `ffa.check.ts` | `modes/ffa/…` (+ `FFA_TRAITS` in `config.ts`) | move | 3, 6 | Feature folder |
+| `game/ffa/zone.ts` | `modes/ffa/zone.ts` (client-only, via `MODE_SCENERY`) | move | 5, 6 | |
+| `game/tdm/*` | `modes/tdm/…` (+ `TDM_TRAITS`; `lineUp` uses `sideOf`) | move | 3, 6 | |
+| – | `modes/{ffa,tdm}/{hud,results}.tsx` | new (extracted) | 5 | Per-mode panels |
 
-### 15.3 Content → `content/`
+### 15.3 Content, render, view, runtime
 
-| Current | Proposed | Action | Phase | Reason |
-|---|---|---|---|---|
-| `game/vehicle/vehicles.ts` | `content/vehicles/index.ts` (VEHICLES) + `content/vehicles/razor/spec.ts` + `content/vehicles/types.ts` | split | 5 | Vehicle feature folder |
-| `game/vehicle/vehicle.ts` | `content/vehicles/razor/model.ts` + `content/vehicles/models.ts` (MODELS) | edit (2: turret via `TURRETS`) → split (5) | 2, 5 | Removes the turret ternary |
-| `game/vehicle/parts.ts` | `content/parts.ts` (wheel, tyre, blade, lamp, spike) + `content/weapons/{minigun,rocketPod}/turret.ts` + `content/weapons/turrets.ts` | split | 2, 5 | Turrets belong to weapons; parts are shared by vehicles and arenas |
-| `game/arena/arena.ts` | `content/arenas/arena.ts` | move | 5 | Contract + kit helpers |
-| `game/arena/digest.ts` | `content/arenas/digest.ts` | move | 5 | Pure |
-| `game/arena/{props,ground,buildings,street}.ts` | `content/arenas/kit/…` | move | 5 | Shared by both maps |
-| `game/arena/scrapyard.ts` | `content/arenas/scrapyard/scrapyard.ts` | move | 5 | Feature folder |
-| `game/arena/city.ts` | `content/arenas/city/city.ts` | move | 5 | Feature folder |
-| `game/maps.ts` | `content/arenas/index.ts` (MAPS, MapId, mapsFor); `loadArena` → `runtime/runtime.ts` | split | 5 | The registry is content; the session cache is runtime |
-| `game/{VehicleGenerator,ArenaGenerator,proceduralTexture}.ts` | `content/legacy/` or delete | **owner decision** | 8 | Unused; `AGENTS.md` keeps them as reference |
-
-### 15.4 Render infrastructure → `render/`
+**Content → `content/`** (weapon specs: see `game/combat.ts` in §15.1)
 
 | Current | Proposed | Action | Phase | Reason |
 |---|---|---|---|---|
-| `game/renderer.ts` | `render/renderer.ts` | move | 5 | The one WebGL context; lazy |
-| `game/materials/*` | `render/materials/*` | move | 5 | Shared GPU resources; server-reachable (headless path) |
-| `game/geometry.ts` | `render/geometry.ts` | move | 5 | Geometry helpers + `disposeGeometries` |
-| `game/environment.ts` | `render/environment.ts` | move | 5 | Sky/sun |
-| `game/postprocessing.ts` | `render/postprocessing.ts` (owns the `Quality` type) | move | 5 | Removes the `settings` ↔ `postprocessing` type edge direction issue |
+| `game/vehicle/vehicles.ts` | `content/vehicles/index.ts` (`VEHICLES`) + `content/vehicles/razor/spec.ts` + `content/vehicles/types.ts` | split | 6 | Vehicle feature folder |
+| `game/vehicle/vehicle.ts` | `content/vehicles/razor/model.ts` + `content/vehicles/models.ts` (`MODELS`) | edit (turret via `TURRETS`) → split | 2, 6 | Removes the turret ternary |
+| `game/vehicle/parts.ts` | `content/parts.ts` (wheel, tyre, blade, lamp, spike) + `content/weapons/{minigun,rocketPod}/turret.ts` + `content/weapons/turrets.ts` | split | 2, 6 | Turrets belong to weapons; parts are shared by vehicles and arenas |
+| `game/arena/arena.ts` | `content/arenas/arena.ts` | move | 6 | Contract + kit helpers |
+| `game/arena/digest.ts` | `content/arenas/digest.ts` | move | 6 | Pure |
+| `game/arena/{props,ground,buildings,street}.ts` | `content/arenas/kit/…` | move | 6 | Shared by both maps |
+| `game/arena/scrapyard.ts` | `content/arenas/scrapyard/scrapyard.ts` | move | 6 | Feature folder |
+| `game/arena/city.ts` | `content/arenas/city/city.ts` | move | 6 | Feature folder |
+| `game/maps.ts` | `content/arenas/index.ts` (`MAPS`, `MapId`, `mapsFor`); `loadArena` → `runtime/runtime.ts` | split | 6 | The registry is content; the session cache is runtime |
+| `game/{VehicleGenerator,ArenaGenerator,proceduralTexture}.ts` | `content/legacy/` or delete | **owner decision** | 9 | Unused; `AGENTS.md` keeps them as reference |
 
-### 15.5 Presentation → `view/`
-
-| Current | Proposed | Action | Phase | Reason |
-|---|---|---|---|---|
-| `game/view.ts` | `view/view.ts` | move (+ `spec.cue`, 2) | 2, 5 | – |
-| `game/pilot.ts`, `game/input.ts`, `game/camera.ts` | `view/…` | move | 5 | The local control source + camera |
-| `game/feed.ts` | `view/feed.ts` | move | 5 | Implements `Feed` |
-| `game/effects.ts`, `game/audio.ts`, `game/sounds.ts` | `view/…` | move | 5 | `audio.ts` has import-time side effects: listed in boundary rule 6 |
-| `game/settings.ts` | `view/settings.ts` | move | 5 | Read by camera/audio/HUD/runtime |
-| `game/turntable.ts` | `view/turntable.ts` | move | 5 | Garage stage |
-
-### 15.6 Runtime → `runtime/`
+**Render infrastructure → `render/`**
 
 | Current | Proposed | Action | Phase | Reason |
 |---|---|---|---|---|
-| `game/runtime.ts` | `runtime/runtime.ts` | move | 5 | Fixes the game↔net inversion |
-| `game/match.ts` | `runtime/match.ts` (`playMatch`, `MatchSource`, `Match`) + `runtime/practice.ts` (`createMatch`) | move (5) → split (6) | 5, 6 | Symmetry with `online.ts` |
-| `game/online.ts` | `runtime/online.ts` | move | 5 | – |
-| `game/loading.ts`, `loading.check.ts` | `runtime/…` | move | 5 | – |
+| `game/renderer.ts` | `render/renderer.ts` | move | 6 | The one WebGL context; lazy |
+| `game/materials/*` | `render/materials/*` | move | 6 | Shared GPU resources; server-reachable (headless path) |
+| `game/geometry.ts` | `render/geometry.ts` | move | 6 | Geometry helpers + `disposeGeometries` |
+| `game/environment.ts` | `render/environment.ts` | move | 6 | Sky/sun |
+| `game/postprocessing.ts` | `render/postprocessing.ts` (owns the `Quality` type) | move | 6 | Fixes the direction of the `settings` ↔ `postprocessing` type edge |
 
-### 15.7 Net, UI, server (mostly unchanged)
+**Presentation → `view/`**
 
 | Current | Proposed | Action | Phase | Reason |
 |---|---|---|---|---|
-| `net/protocol.ts` | same path (**must not move**: `scripts/match-smoke.mjs` reads it) | edit: `weaponId → spec.id`; `Seat` → `SeatInfo`; use `parseLoadout` | 2 | Identity; naming; dedupe |
-| – | `net/events.ts` | new | 3 | Shared wire-event codec |
-| `net/client.ts` | same | edit: decode via `events.ts` | 3 | Removes positional indices |
-| `net/{connection,prediction,snapshots,matchmaking,session,chat,chatCommand}.ts` | same | keep | – | Cohesive |
-| `hud/Hud.tsx` | `hud/Hud.tsx` (shared) + mode panels in `modes/*/hud.tsx` (+ optional `hud/{compass,vitals,weapon,feed,markers,scoreboard}.ts`) | split | 4, 6 | Mode branches out; weapon icon from data |
-| `hud/minimap.ts` | same; marks + colours passed in by the mode panel | edit | 4 | Drops the `ffa/items` import |
-| `hud/Chat.tsx` | same | keep | – | – |
-| `screens/Results.tsx` | same (generic frame) + `modes/*/results.tsx` | split | 4 | Mode branches out |
-| `screens/GameCanvas.tsx` | same + `screens/game/{PauseMenu,ExitConfirm,LoadingOverlay}.tsx` | REVIEW split | 6 | Readability |
-| `screens/Garage.tsx` | same; vehicle pager | edit | 7 | Second-vehicle capability |
-| other `screens/*`, `App.tsx`, `main.tsx`, `analytics.ts` | same | keep (import paths only) | 5 | – |
-| `server/room.ts` | `room.ts` + `server/journal.ts` + `server/inputs.ts` (+ optional `server/matchRecord.ts`) | split | 6 | A persisted format and a tuned policy get their own modules |
-| `server/replay.ts` | same; imports `journal.ts` | edit | 6 | One definition of the format |
-| `server/recorder.ts` | same; encodes via `net/events.ts` | edit | 3 | Shared codec |
-| `server/server.ts` | same + optional `server/netsim.ts` | REVIEW split | 6 | Dev tool vs production door |
-| `server/{lobby,matchmaker,fairplay,records,rewind,auth,arenas,headless,main,load,replay-main,browser}.ts`, `digests.json` | same | keep | – | Cohesive |
+| `game/view.ts` | `view/view.ts` | edit (`spec.cue`) → move | 2, 6 | – |
+| `game/pilot.ts`, `game/input.ts`, `game/camera.ts` | `view/…` | move | 6 | The local control source + camera |
+| `game/feed.ts` | `view/feed.ts` | move | 6 | Implements `Feed` (now with team kills) |
+| `game/effects.ts`, `game/audio.ts`, `game/sounds.ts` | `view/…` | move | 6 | `audio.ts` has import-time side effects: boundary rule 7 |
+| `game/settings.ts` | `view/settings.ts` | move | 6 | Read by camera, audio, HUD and runtime |
+| `game/turntable.ts` | `view/turntable.ts` | move | 6 | Garage stage |
 
-### 15.8 Non-source files that reference paths (must be updated with the moves)
+**Runtime → `runtime/`**
+
+| Current | Proposed | Action | Phase | Reason |
+|---|---|---|---|---|
+| `game/runtime.ts` | `runtime/runtime.ts` | move | 6 | Fixes the game↔net inversion |
+| `game/match.ts` | `runtime/match.ts` (`playMatch`, `MatchSource`, `Match`) + `runtime/practice.ts` (`createMatch`, which plays `classic(mode)`) | move → split | 6, 7 | Symmetry with `online.ts` |
+| `game/online.ts` | `runtime/online.ts` | move | 6 | – |
+| `game/loading.ts`, `loading.check.ts` | `runtime/…` | move | 6 | – |
+
+### 15.4 Net
+
+| Current | Proposed | Action | Phase | Reason |
+|---|---|---|---|---|
+| `net/protocol.ts` | same path | edit: `weaponId → spec.id`, `Seat` → `SeatInfo`, `SLOTS = MAX_SEATS`, `parseLoadout`; lobby part out | 2, 3, 4 | Identity; one constant; split |
+| – | `net/lobbyProtocol.ts` | new (moved out of `protocol.ts`) | 4 | Lobby wire on its own |
+| – | `net/lobbyRules.ts` | new | 3 | One home for rules both sides use |
+| – | `net/events.ts` | new | 4 | Codec |
+| – | `net/sessionSocket.ts` | new (shared dial/retry/mark) | 7 | Two stores, one machinery |
+| `net/client.ts` | same | edit (decode via codec) | 4 | |
+| `net/matchmaking.ts`, `net/custom.ts` | same | edit (use `sessionSocket.ts`) | 7 | |
+| others | same | keep | – | |
+
+### 15.5 UI and server
+
+| Current | Proposed | Action | Phase | Reason |
+|---|---|---|---|---|
+| `hud/Hud.tsx` | shared HUD + mode panels in `modes/*/hud.tsx`; pools from `MAX_SEATS`; chips from `ITEMS`; weapon icon from data (+ optional `hud/{compass,vitals,weapon,feed,markers,scoreboard}.ts`) | edit/split | 2, 3, 5, 7 | Mode branches out; no hard-coded weapons |
+| `hud/minimap.ts` | marks and colours passed in by the mode panel / the supply | edit | 5 | Drops the `ffa/rules` type import |
+| `hud/Chat.tsx` | same | keep | – | Also docked in the waiting room; cohesive |
+| `screens/Results.tsx` | generic frame + `modes/*/results.tsx`; tally key from `lobbyRules` | split/edit | 3, 5 | Mode branches out; one tally rule |
+| `screens/Lobby.tsx` | uses `sideOf`/`startable`/traits; later `screens/custom/{SlotGrid,SettingsCard,InviteCard}.tsx` | edit → split | 3, 7 | Two server rules re-implemented; four concerns |
+| `screens/LobbyForm.tsx` | defaults and field visibility from traits | edit | 3 | 8 mode-literal lines |
+| `screens/{Custom,Lobbies,Lobby,LobbyForm}.tsx` | optionally `screens/custom/` | move | 6 | Feature grouping |
+| `screens/GameCanvas.tsx` | same + optional `screens/game/{PauseMenu,ExitConfirm,LoadingOverlay}.tsx` | REVIEW split | 7 | Readability |
+| `screens/Garage.tsx` | same; vehicle pager | edit | 8 | Second-vehicle capability |
+| other `screens/*`, `App.tsx`, `main.tsx`, `analytics.ts` | same | keep (import paths only) | 6 | – |
+| `server/custom.ts` | same; reads traits + `lobbyRules`; imports `lobbyProtocol` | edit | 3, 4 | No mode literals |
+| `server/room.ts` | `room.ts` + `server/journal.ts` + `server/inputs.ts` (+ optional `server/matchRecord.ts`); custom options grouped; team chat from traits | edit/split | 3, 7 | A persisted format and a tuned policy get their own modules |
+| `server/replay.ts` | same; imports `journal.ts` | edit | 7 | One definition of the format |
+| `server/recorder.ts` | same; encodes via `net/events.ts` | edit | 4 | Shared codec |
+| `server/server.ts` | same + optional `server/netsim.ts` | REVIEW split | 7 | Dev tool vs production door |
+| `server/lobby.ts` | same | keep (REVIEW) | – | Extract the custom hooks only with a third flow |
+| `server/{matchmaker,fairplay,records,rewind,auth,arenas,headless,main,load,replay-main,browser}.ts`, `digests.json` | same | keep | – | Cohesive |
+
+### 15.6 Non-source files that reference paths
 
 | File | Reference | Phase |
 |---|---|---|
-| `game/package.json` `check` script | `src/game/*.check.ts` paths | 5 |
-| `scripts/arena-parity.mjs` | `src/game/maps.ts`, `physics.ts`, `arena/digest.ts` | 5 |
-| `.claude/work/ffa/ffa-metrics.js`, `.claude/work/tdm/tdm-metrics.js` | `import('/src/game/ai.ts')`, `combat.ts`, `ffa/config.ts`, `tdm/config.ts` | 5 |
-| `scripts/match-smoke.mjs` | `game/src/net/protocol.ts` (do **not** move) | – |
-| `game/AGENTS.md` code map, root `AGENTS.md`, `.claude/work/arch/*.md`, `net/NET_ARCHITECTURE.md` | many paths | every phase that moves files |
-| `vite.server.config.ts` `ENTRIES` | server paths (unchanged) + new `golden.check` | 0 |
+| `game/package.json` `check` script | the `src/game/*.check.ts` paths (`ai`, `bots`, `ffa`, `tdm`, `simulation`, `loading`) | 6 |
+| `game/vite.server.config.ts` `ENTRIES` | server check paths (unchanged unless a new bundled check file is added; the Phase 0 pins go into existing files, so none is expected) | 0 (only if needed) |
+| `scripts/arena-parity.mjs` | `src/game/maps.ts`, `physics.ts`, `arena/digest.ts` | 6 |
+| `.claude/work/ffa/ffa-metrics.js`, `.claude/work/tdm/tdm-metrics.js` (balance probes) | `import('/src/game/ai.ts')`, `combat.ts`, `ffa/config.ts`, `tdm/config.ts` | 6 |
+| `scripts/match-smoke.mjs` | reads `PROTOCOL` from `game/src/net/protocol.ts` with a regex: **that path does not move** | – |
+| `scripts/browser-match.mjs` (`custom` mode too) | no source paths; it drives the UI by accessible names (`Play`, `+ Create lobby`, `Advanced`, `More players`, `Create lobby`, `Ready`, `Start match`) and reads `window.match` | 5, 7 (UI splits must keep those names) |
+| `game/AGENTS.md` code map, root `AGENTS.md`, `.claude/work/arch/*.md`, `.claude/work/net/NET_ARCHITECTURE.md` | many paths | every phase that moves files |
+| `.claude/work/custom/PLAN.md` | paths in its file map | 3, 4, 6 |
 
 ---
 
@@ -965,132 +1142,145 @@ Legend: **keep** = no change · **move** = `git mv` + import paths only · **spl
 
 Global invariants for **every** phase (the definition of "behaviour-preserving"):
 
-- `npm run lint` (no new warnings), `npx tsc -b`, `npm run build`, `npm run check` are all green.
-- **Golden fingerprints unchanged** (from Phase 0 on). `server/digests.json` unchanged. `PROTOCOL` stays **5** (except Phase 7).
+- `npm run lint` (0 warnings), `npx tsc -b`, `npm run build` and `npm run check` are all green.
+- **The six golden pins unchanged** (and, from Phase 0 on, the two custom pins and the wire fixtures). `server/digests.json` unchanged. **`PROTOCOL` stays 6** (except Phase 8).
 - The build id changes with every PR. That is expected: pages open across a deploy are told to reload.
-- One concern per PR. Moves (`git mv`) never share a PR with content edits, so review and `git log --follow` stay useful.
-- Every PR updates the docs it invalidates (`game/AGENTS.md` code map at minimum). This is a repo rule.
+- One concern per PR; moves never share a PR with content edits.
+- Every PR updates the docs it invalidates, including `.claude/work/custom/PLAN.md` where paths move.
 
----
-
-### Phase 0: Baseline and characterization (test-only)
+### Phase 0: Close the characterization gaps (test-only)
 
 | | |
 |---|---|
-| **Goal** | Make behaviour change detectable across commits before touching production code. |
-| **Files affected** | New: `server/golden.check.ts`. Edited: `net/protocol.check.ts` (golden bytes), `vite.server.config.ts` (`ENTRIES`), `package.json` (`server:check`). Optional: `server/fixtures/room.ndjson.gz` + expected records. |
-| **What changes** | (1) Golden fingerprints: bots-only matches for {tdm, ffa} × {scrapyard, city}, fixed seeds, 60 s each, hashed (poses to mm, hull, stats, rules events, recorder wire events) against committed constants. (2) Golden wire bytes for one snapshot frame, one welcome, one input, one state. (3) Record the baseline table (§0.3) in the PR description. (4) Manual browser smoke checklist (§17) run once and recorded. |
-| **What must NOT change** | Any production file. |
-| **Tests/checks** | The new checks pass on CI (Node 24) **and** on a developer machine (verifies cross-machine stability; §13.4). |
-| **Expected risk** | Low (test-only). One risk: platform-dependent hashes. Mitigation: per-platform pins or a tolerance fallback. |
-| **Rollback** | Revert the PR. |
-| **Definition of done** | Fingerprints committed and green on CI + one other machine; the baseline recorded. |
+| **Goal** | Pin what the repo's pins don't: wire bytes and non-Classic play. |
+| **Files affected** | `src/net/protocol.check.ts` (fixtures), `server/server.check.ts` or `src/game/simulation.check.ts` (custom pins), optional `server/arena.check.ts` (map × mode at the largest size) |
+| **What changes** | Committed fixtures for a snapshot frame with an absent row, a welcome with settings, a `ro`, an input, a `LobbyRow`/`LobbyView`. Two whole-match pins with custom settings (§13.3). Optionally: every map × every mode it hosts, lined up at the largest size a lobby may choose, built headless. |
+| **What must NOT change** | Production code; the six existing pins; `digests.json`. |
+| **Tests/checks** | The new checks green locally, on CI and on one other machine (the pins must be platform-stable, as the existing ones are shown to be). Mutation test in review: flip one clamp in `packCars` → a fixture fails. |
+| **Expected risk** | Low. |
+| **Rollback** | Revert. |
+| **Definition of done** | Fixtures and the two custom pins committed and run by `npm run check`. |
 
-### Phase 1: Boundary check (codify today's architecture)
+### Phase 1: Boundary check with ratchets (test-only)
 
 | | |
 |---|---|
-| **Goal** | Mechanically prevent regressions of the boundaries that already hold. |
-| **Files affected** | New: `game/boundaries.check.ts` (plain node, no dependencies). Edited: `package.json` `check`. Optional: the (map × mode) line-up matrix in `server/arena.check.ts`. |
-| **What changes** | Rules from §14.1, expressed as **file lists for the current layout**: "server-reachable set", "gameplay files", "browser-only files". It lands **enforcing** (today's code passes it). |
+| **Goal** | Mechanically hold today's boundaries and stop new leaks. |
+| **Files affected** | New `game/boundaries.check.ts`; `game/package.json` (`check` script) |
+| **What changes** | Rules 1–10 of §14.1 on today's file lists, with ratchets for type cycles (1 set) and mode literals (34 lines), and the two named allowances (server-reachable scenery until Phase 5; `loadout.ts` until Phase 2). |
 | **What must NOT change** | Production code. |
-| **Tests/checks** | The check passes. Negative test: temporarily add `import '../game/audio'` to `simulation.ts` → the check fails with a clear message (done in review, not committed). |
-| **Expected risk** | Low. Main risk: false positives from dynamic `import()` or `export … from` forms. Handle both. |
-| **Rollback** | Revert; or remove it from the `check` script. |
-| **Definition of done** | In `npm run check`; documented in `game/AGENTS.md` ("Checks" section); `MODULE_BOUNDARIES.md` points to it as the source of truth. |
+| **Tests/checks** | Passes on today's code. Negative tests in review, each failing with a clear message: an `audio.ts` import into `simulation.ts`; a new `'tdm'` in `server/custom.ts`; a `setTimeout` in `server/custom.ts`; a check file dropped from `package.json`. |
+| **Expected risk** | Low (false positives from `export … from` or dynamic `import()`: handle both). |
+| **Rollback** | Remove it from the `check` script. |
+| **Definition of done** | In `npm run check`; `MODULE_BOUNDARIES.md` points to it as the source of truth. |
 
-### Phase 2: Content identity and registration
-
-| | |
-|---|---|
-| **Goal** | Make weapons plug-and-play and fix the identity defect; small dedupes. |
-| **Files affected** | `game/combat.ts`, `game/ai.ts` (`botGun` keeps `id`; optional `spec.ai`), `net/protocol.ts` (`weaponId`, `Seat` → `SeatInfo`, `parseLoadout`), `game/vehicle/vehicle.ts` + `parts.ts` (`TURRETS`), `hud/Hud.tsx` (icon from `spec.icon`), `game/view.ts` (`spec.cue`), `game/loadout.ts` (+ `runtime`-side storage split, or keep until Phase 5), `game/mode.ts`/`ffa/*`/`tdm/types.ts` (shared `Life`/`Point`), `server/room.ts` + `rewind.ts` + `recorder.ts` (callers of `weaponId`), checks. |
-| **What changes** | `WeaponSpec.id` (equal to its registry key, asserted). `WeaponSpec.turret: string` replaces the `model` union (the HUD `data-kind` uses the turret/icon). A `TURRETS` registry. `WeaponSpec.icon` (SVG path data). Optional `cue`/`ai` with today's values as defaults. `parseLoadout`. Shared types. **Split into 3–4 PRs** (see §22). |
-| **What must NOT change** | Wire bytes (ids are the same strings), fingerprints, visuals (the turret meshes and HUD icons must be pixel-identical), bot RNG draws. |
-| **Tests/checks** | Golden fingerprints; golden wire bytes; new registry consistency checks; `server.check` (records carry weapon ids); manual: garage turntable swaps both turrets, HUD weapon panel shows both icons. |
-| **Expected risk** | Low-medium. `weaponId` has several callers (room, recorder `ro`, records, rewind); a missed caller is a type error once `model` is renamed. |
-| **Rollback** | Revert per PR (each is self-contained). |
-| **Definition of done** | Adding a test-only third weapon (hitscan, reusing the minigun turret) in a scratch branch touches only its spec + `WEAPONS`, and every check passes with the correct id on the wire. |
-
-### Phase 3: Wire event codec
+### Phase 2: Identity and leaf types (behaviour-preserving)
 
 | | |
 |---|---|
-| **Goal** | One definition of each wire event, used by both the encoder and the decoder. |
-| **Files affected** | New: `net/events.ts`. Edited: `server/recorder.ts`, `net/client.ts` (`play`, `mine`), `net/protocol.check.ts`. |
-| **What changes** | Per code (`sh`, `ln`, `rk`, `bu`, `hu`, `wr`, `cr`, `rl`, `sp`, `rc`, `ru`, `go`): the field layout, `encode`, `decode`, `owners`. The recorder and client call them. The rocket-flight joining stays in the recorder. |
-| **What must NOT change** | Bytes/JSON on the wire (`PROTOCOL` 5); **event playback order** (immediate for the player's own events, deferred to the drawn tick for others, catch-up semantics). |
-| **Tests/checks** | Golden wire bytes; codec round trip; `client.check`, `netplay.check`, `server.check` (replay). |
-| **Expected risk** | Medium: an index mistake silently mis-renders effects. The round-trip check and the old-vs-new `owners` table catch it. |
-| **Rollback** | Revert (single PR). |
-| **Definition of done** | No positional `f[n]` access left in `net/client.ts`; adding a hypothetical event is one codec entry + one handler. |
-
-### Phase 4: Mode seam completion
-
-| | |
-|---|---|
-| **Goal** | A third mode touches no shared file. |
-| **Files affected** | `game/mode.ts` (drop `show`), `game/modes.ts` (drop scenery wiring, add `teamPlay`), `game/ffa/mode.ts` (no `scenery` parameter; `share`/`mirror` effects loop), `game/ffa/pickups.ts` → client scenery, new `modes/views.ts` + `modes/scenery.ts` (or `game/modeViews.ts` + `game/modeScenery.ts` before Phase 5), new FFA/TDM hud/results panels, `hud/Hud.tsx`, `hud/minimap.ts`, `screens/Results.tsx`, `game/runtime.ts` / `match.ts` (scenery lifecycle), `server/room.ts:219`, `net/client.ts` (`seatOnline` no longer passes `scene` to the mode). |
-| **What changes** | The `MODE_VIEWS` and `MODE_SCENERY` registries; per-mode HUD/results panels; scenery driven by the runtime; `teamPlay`. **Split into 3 PRs:** (a) scenery out of `MatchMode`; (b) `teamPlay` + the map×mode check; (c) HUD/Results panels. |
-| **What must NOT change** | HUD/Results visuals and per-frame cost; pickup visuals (blink timing, pooling, compile-time materials, which are pre-parked at y=−100 so the shader compile covers them); `restart`/`dispose` order; online mirroring. |
-| **Tests/checks** | All checks; fingerprints unchanged (no sim change); **manual visual parity** (practice TDM + FFA on both arenas: score panels, board, clock through overtime, effect chips, scoreboard with Tab and on death, results for win/draw/loss, the MVP, online people line); a performance spot-check (F3 FPS, no new per-frame allocations: a Chrome allocation timeline for 10 s). |
-| **Expected risk** | Medium (UI parity is manual). |
+| **Goal** | Fix the weapon identity defect; make weapons plug-and-play; put the ids and shared data at the bottom of the graph; break the type cycle. |
+| **Files affected** | `combat.ts` (`id`, `turret`, `icon`, optional `cue`/`ai`); `ai.ts` (`botGun` keeps `id`; `Skill`/`DIFFICULTIES` → a leaf); `net/protocol.ts` (`weaponId` → `spec.id`; `Seat` → `SeatInfo`; `pick()` → `parseLoadout`); `loadout.ts` (`parseLoadout`; storage → `stored.ts`); `vehicle/vehicle.ts` + `parts.ts` (`TURRETS`); `hud/Hud.tsx` (icon from data); `view.ts` (`spec.cue`); a new leaf ids module (`Mode` ids); `modes.ts` (`satisfies Record<Mode, …>`); `matchSettings.ts` (`Mode` and `DIFFICULTIES` from leaves); `mode.ts` (`SupplyView`; `ms`/`clock` to a leaf); the `Point` dedupe; the `weaponId` callers (room, recorder, rewind, records, client) |
+| **What changes** | In 3–4 PRs (§22): leaf ids and data; weapon identity; turrets and weapon data; the loadout parse. The type-cycle ratchet goes to 0. |
+| **What must NOT change** | Wire bytes (the ids are the same strings), pins, visuals, RNG draws, `PROTOCOL` 6. |
+| **Tests/checks** | All; the Phase 0 fixtures; a registry consistency check (every `WEAPONS[k].id === k`; every `turret` key in `TURRETS`); manual garage/HUD parity for both weapons. |
+| **Expected risk** | Low–medium (several `weaponId` callers; a missed one is a type error once `model` is renamed). |
 | **Rollback** | Revert per PR. |
-| **Definition of done** | `grep "mode.kind ==="` finds nothing in `hud/` or `screens/`; `room.ts` has no mode id literals; the server bundle no longer contains `pickups`/`scenery` code (grep `dist-server`). |
+| **Definition of done** | A scratch-branch third gun reusing the minigun turret touches only its spec + `WEAPONS` and reports its own id everywhere (wire, records, replays, the lobby's one-gun setting); `boundaries.check` reports 0 type cycles. |
 
-### Phase 5: Folder reorganisation (mechanical)
+### Phase 3: Mode traits and shared lobby rules (new)
+
+| | |
+|---|---|
+| **Goal** | Code outside a mode's folder learns about modes from one table; the rules both sides use have one home. |
+| **Files affected** | New `modes/traits.ts` (before Phase 6: `game/modeTraits.ts`, extending the Phase 2 leaf) with per-mode entries in `ffa/config.ts` and `tdm/config.ts`; new `net/lobbyRules.ts`; `matchSettings.ts` (`classic`, `CUSTOM.sizes`, `checkSettings`), `server/custom.ts` (side, free slot, regroup, slot claims, start rule, tally), `server/room.ts` (team chat), `tdm/mode.ts` (`lineUp` via `sideOf`), `net/protocol.ts` (`SLOTS`), `roster.ts` (`BOT_NAMES` checked against `MAX_SEATS`); then `screens/Lobby.tsx`, `LobbyForm.tsx`, `Results.tsx`, `hud/Hud.tsx` (pools) |
+| **What changes** | Two PRs: **3a** server and domain; **3b** UI. The mode-literal ratchet goes down to the data lists only. |
+| **What must NOT change** | Behaviour: pins, `custom.check` (71), `client.check` (47), `server.check`'s custom cases, the `protocol.check` fixtures; the server's refusals and their notes; the page's hints and highlights for today's two modes. |
+| **Tests/checks** | All; a new traits-consistency check (`MAX_SEATS` = `SLOTS` = HUD pools = `BOT_NAMES.length`; `CUSTOM.sizes` from traits) and a lobby-rules parity check (`startable`/`tallyKey`/`sideOf` over the cases `custom.check` drives); manual waiting-room parity (hints, sides, tally). |
+| **Expected risk** | Low–medium: regrouping on a mode change and the tally keys are subtle; `custom.check` covers them. |
+| **Rollback** | Revert per PR. |
+| **Definition of done** | No `'tdm'`/`'ffa'` comparison left in `server/`, `matchSettings.ts` or `screens/Lobby*.tsx`; a scratch-branch third-mode skeleton (`sides` 0, sizes 2–8) shows up in the lobby form and lines up without editing any shared file. |
+
+### Phase 4: Wire modules: event codec and lobby protocol
+
+| | |
+|---|---|
+| **Goal** | One definition per wire event; the lobby wire in its own module. |
+| **Files affected** | New `net/events.ts` and `net/lobbyProtocol.ts`; `server/recorder.ts`, `net/client.ts` (`play`, `mine`), `net/protocol.ts` (`parseClient` delegates `lb`), `server/custom.ts`, `net/custom.ts` and the lobby screens' imports |
+| **What changes** | A table of event kinds with field order, quantisation and which events play at once instead of at the drawn tick (today `mine()` and the `ru`/`go` exception, `net/client.ts:130`), used by both the encoder and the decoder. The lobby types, `LOBBY_ACTIONS`, `INVITE`, `readCode`, `tidy`, `LOBBY_FORM` and the `lb` parser move out of `protocol.ts`. |
+| **What must NOT change** | Bytes and JSON (fixtures); `PROTOCOL` 6; event playback order; which events wait for the drawn tick. |
+| **Tests/checks** | Fixtures; a codec round trip (every event kind encodes and decodes to itself); an old-vs-new decode table over a recorded match; `client`, `netplay`, `server` (replay). |
+| **Expected risk** | Medium (positional indices). |
+| **Rollback** | Revert. |
+| **Definition of done** | No positional `f[n]` in `net/client.ts`; the lobby wire (≈120 lines) lives in `lobbyProtocol.ts`, and `protocol.ts` is back near its pre-lobby size. |
+
+### Phase 5: Mode seam in the UI and scenery
+
+| | |
+|---|---|
+| **Goal** | A third mode touches no shared UI file; rendering leaves the gameplay contract. |
+| **Files affected** | `mode.ts` (drop `show`), `modes.ts` (drop the scenery wiring), `ffa/mode.ts`, `tdm/mode.ts` (no `scenery`/`pickups` parameter), the runtime (draws pickups from `mode.supply`; `MODE_SCENERY` for FFA's zone), `MODE_VIEWS` and the per-mode panels, `Hud.tsx`, `minimap.ts`, `Results.tsx`, the `supply.share` loop, the HUD chips from `ITEMS`, `net/client.ts` (`seatOnline` without a scene for the mode) |
+| **What changes** | Three PRs: scenery out → panels → chips and the `share` loop. |
+| **What must NOT change** | HUD/Results visuals and per-frame cost; pickup and zone visuals (pooled, pre-parked for the shader compile); restart/dispose order. |
+| **Tests/checks** | All; manual visual parity (practice and custom: TDM with pickups, FFA, 12 seats, the friendly-fire TK column, results with the lobby tally); an allocation spot-check (a Chrome allocation timeline for 10 s). |
+| **Expected risk** | Medium (manual UI parity). |
+| **Rollback** | Revert per PR. |
+| **Definition of done** | No `mode.kind ===` in `hud/` or `screens/`; no mode literal in `room.ts`; the server bundle no longer contains the pickups or hot-zone views (grep `dist-server`); `boundaries.check`'s Phase 5 allowance removed. |
+
+### Phase 6: Folder reorganisation (mechanical)
 
 | | |
 |---|---|
 | **Goal** | Folders express the boundaries; content becomes feature folders. |
-| **Files affected** | Everything under `src/game/` (§15), import paths across `src/` and `server/`, `package.json`, `scripts/arena-parity.mjs`, balance probes, docs. |
-| **What changes** | `git mv` in **bottom-up order, one PR per layer:** (a) `shared/` + `render/`; (b) `content/` (with the vehicle/weapon/arena feature folders, incl. the `combat.ts` and `vehicles.ts` splits); (c) `sim/` (incl. `ai.ts` moved whole); (d) `modes/`; (e) `view/`; (f) `runtime/` (removes `src/game/`). Then switch the boundaries check from file lists to folder globs. |
-| **What must NOT change** | File contents beyond import specifiers (and the pre-agreed type/registry splits in (b)); the `.ts` import extension convention for node-run modules; `net/protocol.ts`'s path; digests; fingerprints; bytes. |
-| **Tests/checks** | Everything; plus `node scripts/arena-parity.mjs` locally (needs global Playwright, per the root `AGENTS.md`) and one balance-probe run in the dev build to confirm the probe imports resolve. |
-| **Expected risk** | Low per PR but high churn: merge conflicts with in-flight work. Mitigation: announce a short freeze per layer PR; land each PR quickly. |
+| **Files affected** | Everything under `src/game/` (§15), import paths across `src/` and `server/`, `package.json`, `scripts/arena-parity.mjs`, the balance probes, docs (incl. `.claude/work/custom/PLAN.md`); optionally the lobby screens into `screens/custom/`. |
+| **What changes** | `git mv` in **bottom-up order, one PR per layer:** (a) `shared/` + `render/`; (b) `content/` (with the vehicle/weapon/arena feature folders, incl. the `combat.ts` and `vehicles.ts` splits); (c) `sim/` (incl. `ai.ts` moved whole); (d) `modes/` (traits, settings, `items/`, `ffa/`, `tdm/`, registry, roster); (e) `view/`; (f) `runtime/` (removes `src/game/`). Then the boundaries check switches from file lists to folder globs. |
+| **What must NOT change** | File contents beyond import specifiers (and the pre-agreed type/registry splits in (b)); the `.ts` import extension convention for node-run modules; `net/protocol.ts`'s path; digests; pins; bytes. |
+| **Tests/checks** | Everything; plus `node scripts/arena-parity.mjs` locally (needs global Playwright, per the root `AGENTS.md`), one balance-probe run in the dev build to confirm the probe imports resolve, and `node scripts/browser-match.mjs custom`. |
+| **Expected risk** | Low per PR but high churn: merge conflicts with in-flight work. Mitigation: announce a short freeze per layer PR; land each quickly. |
 | **Rollback** | Revert the layer PR (pure moves revert cleanly). |
-| **Definition of done** | `src/game/` no longer exists; the boundaries check uses folder rules; `AGENTS.md` code map and `MODULE_BOUNDARIES.md` rewritten to the new tree. |
+| **Definition of done** | `src/game/` no longer exists; the boundaries check uses folder rules; the `AGENTS.md` code map and `MODULE_BOUNDARIES.md` describe the new tree. |
 
-> **Optional-phase note:** Phase 5 is the **least valuable per unit of risk**. If no third mode or second vehicle is planned in the next few months, stop after Phase 4 and 6. Phases 1–4 deliver the plug-and-play fixes and the enforcement without moving any file. [Medium confidence]
+> **Optional-phase note:** Phase 6 is the **least valuable per unit of risk**. If no third mode, second vehicle or new contributors are planned in the next few months, stop after Phases 0–5 and 7: they deliver the plug-and-play fixes and the enforcement without moving files. [Medium confidence]
 
-### Phase 6: Split oversized modules
+### Phase 7: Split oversized modules and share helpers
 
 | | |
 |---|---|
-| **Goal** | Smaller, single-responsibility modules where it pays. |
-| **Files affected** | `sim/ai.ts` → `sim/ai/*`; `server/room.ts` → `journal.ts`, `inputs.ts` (+ optional `matchRecord.ts`); `server/replay.ts`; `runtime/match.ts` → `practice.ts`; `hud/Hud.tsx` shared parts (optional); `screens/GameCanvas.tsx` (optional); `server/server.ts` → `netsim.ts` (optional). |
-| **What changes** | Code moves between files; **no statement reordering** inside `think()`, `room.step()` or `playMatch.frame()`. |
-| **What must NOT change** | RNG draw order; room step order; journal line format; replay compatibility of journals written by the same build. |
-| **Tests/checks** | Fingerprints; `bots.check`; `server.check` replay; new `inputs.check.ts`; manual: bots in practice look the same over a 2-minute match. |
-| **Expected risk** | Medium (the AI split is the riskiest file-level change in this plan). |
+| **Goal** | Single-responsibility modules where it pays. |
+| **Files affected** | `ai.ts` → `sim/ai/*`; `server/room.ts` → `journal.ts`, `inputs.ts` (+ optional `matchRecord.ts`), grouped custom options; `server/replay.ts`; `net/sessionSocket.ts` shared by both stores; `screens/Lobby.tsx` split; `match.ts` → `practice.ts`; optional `GameCanvas.tsx` split, `server/netsim.ts`, `hud/*` helpers; the netplay timing case measured in steps |
+| **What changes** | Code moves between files; **no statement reordering** inside `think()`, `room.step()` or `playMatch.frame()`; the stores keep their own state machines and only call shared helpers. |
+| **What must NOT change** | RNG draw order; room step order; the journal line format; replay compatibility of journals written by the same build; the stores' reconnect behaviour (`RETRY`, the 15 s and 20 s graces, the `sessionStorage` marks). |
+| **Tests/checks** | Pins; `bots.check`; `server.check` replay; a new `inputs.check`; `client.check` (47) and `scripts/browser-match.mjs custom` for the store helpers; manual: bots in practice look the same over a 2-minute match. |
+| **Expected risk** | Medium (the AI split is the riskiest file-level change in this plan; the store helpers touch the layer where the repo's review found four bugs). |
 | **Rollback** | Revert per module PR. |
-| **Definition of done** | No production file over ~450 lines except content builders (`city.ts`, `scrapyard.ts`, `recipes.ts`) and the cohesive rules files. |
+| **Definition of done** | No production file over ~450 lines except content builders (`city.ts`, `scrapyard.ts`, `recipes.ts`) and the cohesive rules files; `netplay.check`'s rough-link case no longer depends on wall-clock load. |
 
-### Phase 7: Second-vehicle capability (a feature, not a refactor; only when scheduled)
+### Phase 8: Second-vehicle capability (a feature, not a refactor; only when scheduled)
 
 | | |
 |---|---|
-| **Goal** | Seats honour `loadout.vehicle`; bots may draw vehicles; the garage pages vehicles. |
-| **Files affected** | `server/room.ts` (`join`/`leave`/`takeWheel`: replace the car body in place: free the old body, `createCar`, `placeCar` at the current pose), `net/protocol.ts` (`ro` + vehicle, **`PROTOCOL` 6**), `server/journal.ts` (`join` + vehicle), `net/client.ts` (`roster` refit + body swap), `view/view.ts` (`refit` by vehicle), `modes/roster.ts` (bot vehicle draw from its own stream), `screens/Garage.tsx` (pager), `server/arena.check.ts` (every vehicle's shells), `server/server.check.ts` (replace the one-vehicle guard with a two-vehicle test using a check-only spec). |
-| **What changes** | Behaviour changes on purpose, so **re-pin the golden fingerprints in a separate commit**, with a justification. |
-| **What must NOT change** | Practice/online parity; replay equality within a build; the rewind (reads `chassis.shells` per machine). |
-| **Tests/checks** | All; a new mid-match takeover with a different vehicle in `server.check`; netplay with the second vehicle. |
+| **Goal** | Seats honour `loadout.vehicle`; bots may draw vehicles; the garage pages vehicles; a lobby's seat plan carries vehicles. |
+| **Files affected** | `server/room.ts` (`join`/`leave`/`takeWheel`: replace the car body in place: free the old body, `createCar`, `placeCar` at the current pose; a custom seat's vehicle from the plan), `net/protocol.ts` (`ro` + vehicle, **`PROTOCOL` 7**), `server/journal.ts` (`join` + vehicle), `net/client.ts` (roster refit + body swap), `view/view.ts` (`refit` by vehicle), `modes/roster.ts` (`SeatPlan` + vehicle; the bots' vehicle draw from its own stream), optionally a `vehicles` match setting (one vehicle for everyone, like `weapons`), `screens/Garage.tsx` (pager), `server/arena.check.ts` (every vehicle's shells), `server/server.check.ts` (replace the one-vehicle tripwire at line 368 with a two-vehicle test using a check-only spec) |
+| **What changes** | Behaviour changes on purpose, so **re-pin the golden pins in a separate commit**, with the reason, the way the repo re-pinned for team kills. |
+| **What must NOT change** | Practice/online parity; replay equality within a build; the rewind (it reads `chassis.shells` per machine); Classic's line-up when everyone keeps the default vehicle. |
+| **Tests/checks** | All; a new mid-match takeover with a different vehicle in `server.check`; a custom room with mixed vehicles replaying to the bit; netplay with the second vehicle. |
 | **Expected risk** | **High**: Rapier body replacement mid-match (handles, colliders, the vehicle controller, the prediction state machine). |
-| **Rollback** | Revert; `PROTOCOL` goes back to 5 with the revert. |
-| **Definition of done** | A person can pick vehicle B in the garage and play it online; bots use both; replays reproduce it. |
+| **Rollback** | Revert; `PROTOCOL` goes back to 6 with the revert. |
+| **Definition of done** | A person can pick vehicle B in the garage and play it online, in Classic and in a custom lobby; bots use both; replays reproduce it. |
 
-### Phase 8: Documentation and cleanup
+### Phase 9: Documentation and cleanup
 
 | | |
 |---|---|
 | **Goal** | Docs match the code; decide the loose ends. |
-| **Files affected** | `game/AGENTS.md`, root `AGENTS.md` (repo layout line), `.claude/work/arch/*` (`ARCHITECTURE.md`, `MODULE_BOUNDARIES.md`, `STATE_OWNERSHIP.md`, `GAME_LOOP.md`), `.claude/work/net/NET_ARCHITECTURE.md` ("Adding content, online"). Owner decisions: legacy generators, the Vitest dev dependency. |
-| **What changes** | Docs; possibly remove unused files/dependencies (owner's call). |
+| **Files affected** | `game/AGENTS.md`, root `AGENTS.md` (repo layout line), `.claude/work/arch/*` (`ARCHITECTURE.md`, `MODULE_BOUNDARIES.md`, `STATE_OWNERSHIP.md`, `GAME_LOOP.md`, `LOADING_ARCHITECTURE.md`), `.claude/work/net/NET_ARCHITECTURE.md` ("Adding content, online"), `.claude/work/custom/PLAN.md` (paths). Owner decisions: the legacy generators, the Vitest dev dependency. |
+| **What changes** | Docs; possibly removing unused files and dependencies (owner's call). |
 | **What must NOT change** | Code behaviour. |
 | **Tests/checks** | All green; the `boundaries.check` rules quoted verbatim in `MODULE_BOUNDARIES.md`. |
 | **Expected risk** | Low. |
 | **Rollback** | Revert. |
-| **Definition of done** | The "How to add …" section lists exactly the steps in §6 of this plan. |
+| **Definition of done** | The "How to add …" sections list exactly the steps in §6 of this plan. |
+
+**Why this order.** Phases 0–1 are test-only and protect everything after them. Phase 2 fixes a real defect and puts the ids at the bottom of the graph, which Phase 3 needs. Phase 3 removes the leaks the custom work introduced while they are few and fresh, before a third mode or a lobby feature copies them. Phases 4–5 finish the seams; 6–7 are housekeeping; 8 waits for a product decision.
 
 ---
 
@@ -1098,37 +1288,51 @@ Global invariants for **every** phase (the definition of "behaviour-preserving")
 
 | Behaviour | Where it lives | How it is verified |
 |---|---|---|
-| Practice match (player + 7 bots, difficulty) | `createMatch`, roster, sim | golden fingerprints; `simulation.check`; manual smoke |
-| FFA (rules, items, hot zones, overtime, standings, nemesis) | `ffa/*` | `ffa.check` (143); fingerprints; manual HUD/Results |
-| TDM (team score, protection ends on firing, MVP, overtime) | `tdm/*` | `tdm.check` (163); fingerprints; manual |
-| Bots (targeting, routing, cover, ambushes, per-difficulty skill, weapon draw) | `ai.ts`, `roster.ts`, tactics | `bots.check` (ranges); fingerprints |
-| Vehicle physics (ray-cast car, upend recovery, stuck recovery) | `drive.ts`, `simulation.ts` | fingerprints; `simulation.check` "it drives"; `netplay.check` (prediction error) |
-| Weapons (fire rate, magazine, reload, spread, rockets, blast shove/falloff) | `combat.ts`, `simulation.ts` | fingerprints; `simulation.check`; `server.check` fire-rate authority |
-| Combat, damage, protection, wrecks | sim + rules | same |
-| Scoring and statistics | `scoring.ts` + rules | rules checks; `server.check` records |
-| Respawn (wait, spawn choice with sight lines) | rules `pickSpawn`, sim `respawn` | rules checks; fingerprints |
-| Map loading (session cache, headless parity) | `maps.ts`, `arenas.ts` | `arena.check` digests; `arena-parity.mjs` (manual) |
-| Loadout (ids, persistence, server fallback for unknown ids) | `loadout.ts`, `parseClient` | `protocol.check`; manual reload |
-| Matchmaking (queue, groups, ready check, grace, backfill, requeue) | `matchmaker.ts`, `lobby.ts`, `net/matchmaking.ts` | `matchmaker.check` (63); `server.check` |
-| Ready check | same | same |
-| Online match (authority, forged/stale input, hold for page loads, next match) | `room.ts`, `server.ts` | `server.check` (133) |
-| Prediction/reconciliation | `prediction.ts`, `client.ts` | `netplay.check`, `client.check` |
-| Interpolation (DELAY 4 ticks, events at drawn tick) | `snapshots.ts`, `client.ts` | `netplay.check` |
-| "Reconnect". In this codebase this means a **search** survives a dropped socket or reload for 15 s (grace + `sessionStorage`). A dropped *match* socket hands the seat to a bot; there is no mid-match rejoin of the same seat. | `matchmaker.ts`, `net/matchmaking.ts` | `server.check` "a drop and its grace"; manual reload during search |
-| Replay (room journal → identical records, fair-play counts included) | `room.ts`, `records.ts`, `replay.ts` | `server.check` replay; `replay.js` tool |
-| Chat (channels from the welcome, whispers by uid, typing never drives) | `net/chat.ts`, `hud/Chat.tsx`, `room.ts` channels | `chat.check`; `scripts/chat-smoke.mjs` (needs Nakama); manual |
-| Fair-play tracking | `fairplay.ts`, `room.watch` | `fairplay.check`; `server.check` records |
-| Build/protocol compatibility | `PROTOCOL`, `BUILD`, `digests.json` | `server.check` door; deploy smoke (`match-smoke.mjs`) |
-| Loading (progress = finished/total, retry, cancel, failure paths) | `loading.ts`, `runtime.ts` | `loading.check` |
-| Dev tooling (`window.match`, `window.camera`, `window.tick`, F3 overlay lines) | `runtime.ts`, `match.ts` | manual; balance probes rely on the `window.match` shape |
+| Practice match (player + 7 bots, difficulty) and Classic online, exactly as before | `createMatch` with `classic(mode)`, roster, sim, rules | the six golden pins; `simulation.check` (58); manual smoke |
+| FFA (rules, pickups through the supply, hot zones, overtime, standings, nemesis) | `ffa/*`, `items/*` | `ffa.check` (152); pins; manual HUD/Results |
+| TDM (team score, protection ends on firing, MVP, overtime; pickups only when a lobby turns them on) | `tdm/*`, `items/*` | `tdm.check` (182); pins; manual |
+| Bots (targeting, routing, cover, ambushes, per-difficulty skill, weapon draw; holding fire near teammates with friendly fire) | `ai.ts`, `roster.ts`, tactics | `bots.check` (21; kills a minute 7.8 / 13.8 / 17.8 within its ranges); `tdm.check` (`clearOfMates`); pins |
+| Vehicle physics (ray-cast car, upend recovery, stuck recovery) | `drive.ts`, `simulation.ts` | pins; `simulation.check` "it drives"; `netplay.check` (prediction error) |
+| Weapons (fire rate, magazine, reload, spread, rockets, blast shove/falloff) | `combat.ts`, `simulation.ts` | pins; `simulation.check`; `server.check` fire-rate authority |
+| Combat, damage, protection, wrecks; friendly fire decided by the rules | sim + rules | same; `tdm.check` friendly-fire credit |
+| Scoring and statistics (incl. `teamKills`) | `scoring.ts` + rules | rules checks; `server.check` records |
+| Respawn (waits as shares of the clock, the respawn-speed setting, spawn choice with sight lines) | `respawnWait`, rules `pickSpawn`, sim `respawn` | rules checks; pins |
+| Map loading (session cache, headless parity) | `maps.ts`, `server/arenas.ts` | `arena.check` (72; digests `227c4ce7` / `8913ad26`); `scripts/arena-parity.mjs` (manual) |
+| Loadout (ids, persistence, server fallback for unknown ids) | `loadout.ts`, `parseClient` | `protocol.check` (90); manual reload |
+| Classic matchmaking (queue, groups, ready check, grace, backfill, requeue) | `matchmaker.ts`, `lobby.ts`, `net/matchmaking.ts` | `matchmaker.check` (63); `server.check` (166) |
+| Online match (authority, forged/stale input, hold for page loads, next match) | `room.ts`, `server.ts` | `server.check` |
+| Prediction/reconciliation | `prediction.ts`, `client.ts` | `netplay.check` (33), `client.check` (47) |
+| Interpolation (`DELAY` 4 ticks, events at the drawn tick) | `snapshots.ts`, `client.ts` | `netplay.check` |
+| "Reconnect", Classic: a **search** survives a dropped socket or a reload for 15 s (grace + `sessionStorage`); a dropped *match* socket hands the seat to a bot, with no mid-match rejoin of the same seat | `matchmaker.ts`, `net/matchmaking.ts` | `server.check` "a drop and its grace"; manual reload during a search |
+| "Reconnect", custom (new): a member keeps their slot, and in a match their seat, for 20 s; coming back gets a fresh welcome for the held seat; a reload resumes; too late → the list with the reason | `server/custom.ts`, `net/custom.ts`, `App.tsx` | `client.check`; manual in Chrome (the repo's review did this with Nakama up) |
+| Replay (room journal → identical records, fair-play counts included; custom rooms with settings, lobby and seat plan in the header) | `room.ts`, `records.ts`, `replay.ts` | `server.check` replay (Classic and custom); the `replay.js` tool |
+| Chat (channels from the welcome, whispers by uid, typing never drives; a lobby's channel carries on into its match; chat docked in the waiting room) | `net/chat.ts`, `hud/Chat.tsx`, `room.ts` channels, `custom.ts` | `chat.check` (14); `scripts/chat-smoke.mjs` (needs Nakama); manual |
+| Fair-play tracking | `fairplay.ts`, `room.watch` | `fairplay.check` (10); `server.check` records |
+| Build/protocol compatibility | `PROTOCOL` (6), `BUILD`, `digests.json` | `server.check` door; deploy smoke (`scripts/match-smoke.mjs`) |
+| Loading (progress = finished/total, retry, cancel, failure paths) | `loading.ts`, `runtime.ts` | `loading.check` (23) |
+| Dev tooling (`window.match`, `window.camera`, `window.tick`, F3 overlay lines) | `runtime.ts`, `match.ts` | manual; the balance probes and `browser-match.mjs` rely on the `window.match` shape |
+| Match settings: size 2–12 (TDM even), duration, respawn ×0.5/1/1.5, friendly fire + team kills, pickup groups in both modes, one gun for everyone, kill limit | `matchSettings.ts`, rules, roster, room | `ffa.check`, `tdm.check`, `simulation.check`, `server.check`; the Phase 0 custom pins |
+| Empty seats: out of play, a quiet leave, a protected entry at a rules-picked start, invisible everywhere on the page | sim, rules, rewind, client, view, HUD | `simulation.check`, `tdm.check`, `server.check`, `client.check` |
+| Lobby list: public lobbies only, no secrets, sent at most twice a second | `custom.ts` | `custom.check` (71) |
+| Create; join from the list (password + lockout), by code or by link (no password); bans; kick; owner hand-off (longest present); deletion when the owner leaves alone; idle close (30 min); caps (`MAX_LOBBIES`) | `custom.ts` | `custom.check`, `server.check` |
+| Waiting room: ready; slot claims (first wins, ready kept); bots per slot at a difficulty; edit (unreadies everyone, regroups, resets the tally on a mode change) | `custom.ts`, `Lobby.tsx` | `custom.check` |
+| Start: ≥ 2 people, every other person ready and connected, TDM someone on each side, a room free | `custom.ts` | `custom.check` |
+| A lobby's match on the members' lobby sockets; join in progress; Back to lobby; the end → waiting room and the tally (TDM by side, FFA by player or bot slot; draws and abandoned matches count nothing); abandoned after 10 s with nobody seated; a minute idle → waiting room | `lobby.ts`, `room.ts`, `custom.ts`, `net/custom.ts` | `server.check`, `client.check`, `scripts/browser-match.mjs custom` |
+| `?join=` invite links; StrictMode double mounts in development | `net/custom.ts`, `App.tsx` | `client.check`; manual dev-mode run |
+| Classic never offered a custom room; a session uses Classic or custom, not both | `room.open()`, `lobby.ts` | `server.check` |
+| No invite code or password in the logs | `custom.ts`, `server.ts` | `server.check` |
 
-**Manual browser smoke checklist** (run in Phase 0 and after each UI-touching PR; the repo has no browser automation in CI):
+**Manual browser smoke checklist** (run in Phase 0 and after each UI-touching PR; the repo has headless automation in `scripts/browser-match.mjs`, but it is not in CI and does not judge visuals):
+
 1. Startup → menu (no console errors).
 2. Garage: swap weapons; the turret updates.
 3. Practice TDM on the Scrapyard: countdown, fight, get wrecked (death board), respawn, Tab scoreboard, pause/resume, settings change, forced end → results → Play again.
 4. Practice FFA on The City: pickups, hot zone, effect chips, standings, results (placing, crown).
-5. Online: a local server + two tabs (Find Match → ready check → match), chat, leave → a bot takes over.
-6. Exit to garage: `window.match` cleared; the renderer holds the same geometries/textures count as before (the `LOADING_ARCHITECTURE.md` method).
+5. Online Classic: a local server + two tabs (Find Match → ready check → match), chat, leave → a bot takes over.
+6. Custom lobby: create one (Advanced: TDM 6 v 6, friendly fire, pickups on), join from a second window by code and from a third by the link, ready, start at 2 of 12, play (the TK column, pickups in TDM), Back to lobby, the end and the tally, Edit with a mode change (everyone unready, regrouped, tally reset), kick a member mid-match, reload in the waiting room and in a match (back within 20 s).
+7. Exit to garage: `window.match` cleared; the renderer holds the same geometry/texture counts as before (the `LOADING_ARCHITECTURE.md` method).
+
+`node scripts/browser-match.mjs custom` automates most of step 6 headlessly (needs Playwright installed globally, per the root `AGENTS.md`); it does not cover a reload in a match (`client.check` does).
 
 ---
 
@@ -1136,49 +1340,65 @@ Global invariants for **every** phase (the definition of "behaviour-preserving")
 
 | Area | Why it is dangerous | Guard |
 |---|---|---|
-| **Deterministic simulation / RNG streams** | Three seeded mulberry32 streams (`seed ^ 0x9e3779b9` sim, `seed ^ 0x2545f491` bot guns, `createRng(seed)` FFA rules). **Every `random()` call's position in the sequence matters.** Reordering a `think()` branch, iterating combatants in another order, or adding one draw shifts every later draw, so all later matches diverge. Online, prediction does not use RNG, but replays and practice↔room parity do. | fingerprints; `simulation.check` replay; `server.check` room=practice |
-| **Rapier state and creation order** | Collider creation order (ground slab, arena colliders in array order, then one `world.step()` to build query structures), body creation order (`enlist` in seat order), shell order, wheel order (fl, fr, rl, rr), `setCanSleep(false)`, CCD, body-type switches (remote cars kinematic; the prediction toggles Dynamic/Kinematic). Handles and solver order change results. A known Rapier 0.20 quirk (NET_PLAN F5): moved kinematic bodies are invisible to ray casts until `world.step()`. | fingerprints; `netplay.check` |
-| **Fixed timestep** | `PHYSICS_STEP = 1/60` (`physics.ts`) and `RATE.step = 60` (`protocol.ts`) are **two constants that must agree**; `world.timestep` is set explicitly; frame dt is clamped at 0.1 s; the server `CATCH_UP = 5`. Moving either constant without the other breaks the client `held()` GO-step maths. | a check asserting `RATE.step * PHYSICS_STEP === 1` (add in Phase 1) |
-| **Prediction/reconciliation** | The client drives with controls **rounded to hundredths exactly as `parseClient` reads them**; `held(seq)` re-derives the server's pre-match hold step by summing steps the way the rules do; reconciliation replays inputs with `world.step()` on the whole local world; `firm` handling until the first ack. Small refactors (rounding, order of `drive` vs body placement) cause constant corrections. | `netplay.check` (corrections/errors printed and bounded) |
-| **Snapshot interpolation** | `DELAY = 4` ticks; the server-tick reckoning from the least-delayed arrivals; `drawn` never goes backwards; events wait for the drawn tick except the player's own (`mine()`); catch-up after 1 s drops effects but keeps rules events. The codec refactor (Phase 3) touches exactly this. | `netplay.check`, `client.check`; old-vs-new `owners()` table |
-| **Replay determinism** | Journal semantics: join/leave apply *after* step k, `in` lines apply *at* step k (`ahead()` in `replay.ts`); a given is written only when it changes, and the view is stored as lag. `room.step()` order: release hold → drive humans → journal → `sim.step` → `rewind.record` → rules events → report → outcome/restart → broadcast. Any reorder breaks replay equality. Journals are for fair-play review within `REPLAY_DAYS`; a deploy in that window already means replaying old-build journals on new code. That is a pre-existing limitation; do not make it worse by changing the line format without a version field. | `server.check` replay; the optional replay fixture |
-| **Server/client protocol** | Binary layout (`HEAD_BYTES 14`, `CAR_BYTES 44`, `ME_BYTES 40`), clamps, JSON event arrays, `PROTOCOL` bump discipline, `parseClient` clamping. A refactor that changes bytes without a bump lets old pages mis-parse. | golden wire bytes; `protocol.check` |
-| **Build id** | `build-id.ts` hashes `src/`, `server/` and the lockfile **including relative paths**. Every move changes the id, so every deploy makes open pages reload. That is expected but should be announced. `scripts/match-smoke.mjs` regex-reads `PROTOCOL` from `game/src/net/protocol.ts`: **moving that file breaks the deploy smoke test.** | keep `net/protocol.ts` in place |
-| **Arena digests** | Colliders come from `solid()` on props, via `matrixWorld`, and are rounded to mm. Changing builder call order, a seeded draw, a prop dimension, or when `solid()` is called relative to placement changes the digest. The server and deployed pages then disagree ("Arena mismatch — reload"). | `arena.check` vs `digests.json`; `arena-parity.mjs` |
-| **Headless arena builds** | The server runs visual builders with a fake `document` and no `window`; `materials/library.ts` skips the GPU bake when `window` is undefined. Adding `window` access at import time to any content module, or a new material path that ignores `headless`, crashes or diverges the server. | `arena.check`; boundaries rule 2/6 |
-| **Asset lifecycle and Three.js disposal** | Library materials and baked textures are session-wide and **never disposed** by scene code. Geometries are disposed per match (`disposeGeometries`). The cached arena is borrowed by a scene and handed back by `scene.clear()`. `view.refit` rebuilds a model in place (the HUD keeps the `CarView` object). The server `strip()` disposes headless geometries. A "tidy" refactor that adds `material.dispose()` breaks the next match. **The first glTF assets will bring per-asset materials/textures that *do* need disposal:** the rule must be refined then. | `STATE_OWNERSHIP.md`; the renderer counts in the manual smoke |
+| **Deterministic simulation / RNG streams** | Four seeded mulberry32 streams: simulation `seed ^ 0x9e3779b9`, bot guns `seed ^ 0x2545f491` (`roster.ts`), FFA rules `createRng(seed)`, TDM rules `createRng(seed)` (the supply's, used only when pickups are on). **Every `random()` call's position in its sequence matters.** Reordering a `think()` branch, iterating combatants in another order, or adding one draw shifts every later draw, so the match diverges from there on. Online, prediction does not use RNG, but replays and practice↔room parity do. | pins; `simulation.check` replay; `server.check` room = practice |
+| **Rapier state and creation order** | Collider creation order (ground slab, arena colliders in array order, then one `world.step()` to build query structures), body creation order (`enlist` in seat order, empty seats included), shell order, wheel order (fl, fr, rl, rr), `setCanSleep(false)`, CCD, body-type switches (remote cars kinematic; the prediction toggles Dynamic/Kinematic), and now bodies disabled for absent machines. Handles and solver order change results. A known Rapier 0.20 quirk (`NET_PLAN.md` F5): moved kinematic bodies are invisible to ray casts until `world.step()`. | pins; `netplay.check` |
+| **Fixed timestep** | `PHYSICS_STEP = 1/60` (`physics.ts`) and `RATE.step = 60` (`protocol.ts`) are **two constants that must agree**; `world.timestep` is set explicitly; frame dt is clamped at 0.1 s; the server's `CATCH_UP` is 5. Moving either constant without the other breaks the client's `held()` GO-step maths. | `boundaries.check` rule 9 (Phase 1) |
+| **Prediction/reconciliation** | The client drives with controls **rounded to hundredths exactly as `parseClient` reads them**; `held(seq)` re-derives the server's pre-match hold step by summing steps the way the rules do; reconciliation replays inputs with `world.step()` on the whole local world; `firm` handling until the first ack. Small refactors (rounding, the order of `drive` vs body placement) cause constant corrections. | `netplay.check` (corrections and errors printed and bounded) |
+| **Snapshot interpolation** | `DELAY = 4` ticks; the server-tick reckoning from the least-delayed arrivals; `drawn` never goes backwards; events wait for the drawn tick except the player's own (`mine()`) and `ru`/`go`; catch-up after 1 s drops effects but keeps rules events. The codec refactor (Phase 4) touches exactly this. | `netplay.check`, `client.check`; the old-vs-new `owners()`/`mine()` table (§9.4) |
+| **Replay determinism** | Journal semantics: join/leave apply *after* step k, `in` lines apply *at* step k (`ahead()` in `replay.ts`); a given is written only when it changes, and the view is stored as lag. `room.step()` order: release hold → drive people (+ journal notes) → journal `in` → `sim.step` → `rewind.record` → rules events → `report` → outcome, or after the results `end` (custom) / `restart` (Classic) → the custom abandonment check → broadcast → the idle check. Any reorder breaks replay equality. Journals are for fair-play review within `REPLAY_DAYS` (3 by default); a deploy in that window already means replaying old-build journals on new code, a pre-existing limitation: do not make it worse by changing the line format without a version field. | `server.check` replay (Classic and custom) |
+| **Settings in the determinism path** (new) | The rules read the settings every step; the replay header and the welcome carry them. A refactor that changes a default, the respawn share arithmetic (`elapsed < share * duration`) or the order of the TDM rules' seeded draws changes play. | pins (Classic); the Phase 0 custom pins |
+| **Server/client protocol** | Binary layout (`HEAD_BYTES` 14, `CAR_BYTES` 44, `ME_BYTES` 40; the `absent` flag in the existing flags byte), clamps, JSON event arrays, the lobby messages (`lb`, `lbs`), `PROTOCOL` bump discipline (now 6), `parseClient` clamping. A refactor that changes bytes or a JSON shape without a bump lets old pages mis-parse. | the Phase 0 fixtures; `protocol.check` |
+| **Build id** | `build-id.ts` hashes `src/`, `server/` and the lockfile **including relative paths**. Every move changes the id, so every deploy makes open pages reload (expected; announce it). `scripts/match-smoke.mjs` regex-reads `PROTOCOL` from `game/src/net/protocol.ts`: **moving that file breaks the deploy smoke test.** | keep `net/protocol.ts` in place |
+| **Arena digests** | Colliders come from `solid()` on props, via `matrixWorld`, rounded to mm. Changing builder call order, a seeded draw, a prop dimension, or when `solid()` is called relative to placement changes the digest; the server and deployed pages then disagree ("Arena mismatch — reload"). The custom work changed the bases on purpose (six starts a base) and re-pinned. | `arena.check` vs `digests.json`; `scripts/arena-parity.mjs` |
+| **Headless arena builds** | The server runs visual builders with a fake `document` and no `window`; `materials/library.ts` skips the GPU bake when `window` is undefined. Adding `window` access at import time to any content module, or a material path that ignores headless mode, crashes or diverges the server. | `arena.check`; boundary rules 2 and 7 |
+| **Asset lifecycle and Three.js disposal** | Library materials and baked textures are session-wide and **never disposed** by scene code. Geometries are disposed per match (`disposeGeometries`). The cached arena is borrowed by a scene and handed back by `scene.clear()`. `view.refit` rebuilds a model in place (the HUD keeps the `CarView` object). The server's `strip()` disposes headless geometries. Pickup tokens and the hot zone are pooled and pre-parked for the shader compile. A "tidy" refactor that adds `material.dispose()` breaks the next match. **The first glTF assets will bring per-asset materials and textures that *do* need disposal:** the rule must be refined then. | `STATE_OWNERSHIP.md`; the renderer counts in the manual smoke |
 | **Shared materials** | `memo` keys dedupe materials across the whole app; wreck charring swaps materials per mesh and restores from `paint`. Mutating a shared material (colour, uniforms) changes every mesh using it. | code review; manual smoke |
-| **WebSocket lifecycle** | The matchmaking socket *becomes* the match link (`takeSeat`); `link.close()` semantics; StrictMode double-mount in dev ("a link whose match never ran is the caller's"); `App` closes the seat on exit; ping interval cleanup. | `client.check`, `server.check`; manual dev-mode run |
-| **Matchmaking state** | Ticket grace (15 s), `sessionStorage` mark, retry backoff `[0, 1000, 2000, 4000, 7000]`, one live connection per user (a second tab takes the ticket), searching while seated is refused. | `matchmaker.check`, `server.check` |
+| **WebSocket lifecycle (Classic)** | The matchmaking socket *becomes* the match link (`takeSeat`); `link.close()` semantics; StrictMode double mounts in development ("a link whose match never ran is the caller's"); `App` closes the seat on exit; ping interval cleanup. | `client.check`, `server.check`; manual dev-mode run |
+| **The lobby ↔ match socket handoff** (new) | One socket serves the lobby, then the match (lobby words go to `aside`), then the lobby again (`release`). The match's `close()` must leave a released socket open; a released link must not report "connection lost"; inputs still in flight after the match are ignored, not struck. The repo's review fixed several bugs here. | `client.check`, `server.check`, `scripts/browser-match.mjs custom` |
+| **Matchmaking state** | Ticket grace (15 s), the `sessionStorage` mark, retry backoff `[0, 1000, 2000, 4000, 7000]`, one live connection per user (a second tab takes the ticket), searching while seated refused, Classic or custom per session. | `matchmaker.check`, `server.check` |
+| **Coming back to a custom lobby** (new) | The 20 s grace, `back` with the lobby id from `sessionStorage`, a fresh welcome for a held seat. A socket the server hasn't noticed is dead keeps holding a custom seat until the minute without input frees it (a known limit). | `client.check`; documented limit |
+| **Empty seats** (new) | A new per-seat reader that forgets `present` shows a ghost car, counts a machine that isn't there, or lets a ray hit nothing. There are many readers (sim, rules, rewind, client, view, HUD, minimap, scoreboard, results, bots, spawn scoring). | the existing checks walk an empty seat through today's readers; the review checklist for new ones (§8.4) |
+| **Lobby secrets** (new) | Codes and passwords must never be logged, listed or echoed; a wrong code is a strike; the lockout bounds the scrypt cost on the loop thread. | `server.check` (logs), `custom.check` (list) |
+| **Shared room capacity** (new) | Busy custom lobbies can leave Classic with "no room free"; rooms are counted by kind, nothing is reserved yet. | `/health` counts; owner decision |
+| **Deploy configuration** (new) | `deploy/compose.yml` passes neither `MAX_ROOMS` nor `MAX_LOBBIES` on purpose: podman-compose 1.3.0 would pass `${VAR:-default}` as text and stop the server. | the `compose.yml` comment; keep plain numbers if ever passed |
+| **In-memory lobbies** (new) | A deploy or a crash ends every lobby. | accepted limit (one server); revisit with several servers (the repo plans the list in Nakama then) |
 | **`.ts` import convention** | Modules loaded by plain-node checks import local files **with `.ts`**. A refactor that "cleans up" extensions, or adds path aliases, breaks `npm run check` outside Vite. | CI |
-| **HUD per-frame writes** | `update()` runs every frame and writes only changed values; no allocations; elements are collected once by `data-hud`. Mode panels must scope their queries to their own root, or the TDM panel can grab the FFA panel's slots. | manual perf/allocation spot-check |
+| **HUD per-frame writes** | `update()` runs every frame and writes only changed values; no allocations; elements are collected once by `data-hud` (pools of 12 now). Mode panels must scope their queries to their own root, or the TDM panel can grab the FFA panel's slots. | manual performance/allocation spot-check |
 | **Loading runner** | Reports must be painted before each task (`flushSync`); tasks must be idempotent for Retry; dispose is safe at any point. Moving loading code must keep these contracts. | `loading.check` |
-| **Dev probes** | The balance probes import `/src/game/*.ts` paths and rely on the `window.match` shape (`match.mode.rules`, `match.mode.tactics`, `match.chase`, `match.others`). | Phase 5 updates the probes; one probe run |
+| **Dev probes** | The balance probes import `/src/game/*.ts` paths and rely on the `window.match` shape (the probes' own headers name `match.mode.rules`, `match.mode.tactics`, `match.chase`); `browser-match.mjs` reads `window.match` too. | Phase 6 updates the probes; one probe run |
+| **Re-pinning** | A legitimate behaviour change must re-pin; an illegitimate one must not be "fixed" by re-pinning. | re-pins in their own commit, with the reason and the old hashes shown to match with the change left out, as the repo did |
+| **Agent-written claims** | The repo's review found a log describing checks, flows and timings that did not exist. | Phase 1's "every check runs" rule; CI output, not prose, as evidence |
 
 ---
 
 ## 19. Avoiding over-engineering
 
-**Rejected, with the concrete reason for this codebase:**
+**Rejected or postponed, with the concrete reason for this codebase:**
 
 | Idea | Why not here |
 |---|---|
-| **ECS** | About 8 combatants and a few rockets per match. Combatants are plain objects iterated in arrays; the step order *is* the determinism contract. An ECS would re-express everything, risk the RNG and Rapier order, and speed nothing up (a room step averages ~0.24 ms, measured by `server.check`). |
-| **Event bus** | `SimEvents` (direct calls, one interface) and rules event queues (drained per step) already give ordering guarantees a bus would lose. Mid-step ordering of effects and sounds matters (`GAME_LOOP.md`). |
-| **DI framework / service locator** | Composition happens in 3 places (`createMatch`, `createOnlineMatch`, `createRoom`) with explicit arguments. It is readable and checkable. |
-| **Redux/Zustand** | React state holds 6 UI values in `App.tsx`; gameplay state must *not* be in React. The two external stores (`settings`, matchmaking) are 60–190-line modules with `onChange`/`useSyncExternalStore`. |
+| **ECS** | At most 12 machines and a few rockets per match. Combatants are plain objects iterated in arrays; the step order *is* the determinism contract. An ECS would re-express everything, risk the RNG and Rapier order, and speed nothing up (a room step averages ~0.22–0.24 ms in `server.check`'s 30 s runs). |
+| **Event bus** | `SimEvents` (direct calls, one interface) and the rules' event queues (drained per step) already give ordering guarantees a bus would lose. Mid-step ordering of effects and sounds matters (`GAME_LOOP.md`). |
+| **DI framework / service locator** | Composition happens in three places (`createMatch`, `createOnlineMatch`, `createRoom`) with explicit arguments, plus the services' hooks (`LobbyHooks`, the matcher's). It is readable and checkable. |
+| **Redux/Zustand** | React state in `App.tsx` is five UI values; gameplay state must *not* be in React. The three external stores (`settings.ts` 61 lines, `net/matchmaking.ts` 189, `net/custom.ts` 274) are modules with listeners read through `useSyncExternalStore`. |
 | **Physics abstraction** | One engine; prediction must run the *same* `drive.ts` on the *same* Rapier; hitscan, AI perception, item placement and aim are Rapier queries. An abstraction would be leaky and would put bit-exactness at risk. |
-| **Replacing Three.js maths in the sim** | `THREE.Vector3/Quaternion` are used as maths throughout the hot paths; replacing them changes float operation sequences, so every fingerprint, replay and practice↔room parity result changes. Nothing is gained: the server bundles Three.js anyway (for the arena builders). |
+| **Replacing Three.js maths in the sim** | `THREE.Vector3`/`Quaternion` are used as maths throughout the hot paths; replacing them changes float operation sequences, so every pin, replay and practice↔room parity result changes. Nothing is gained: the server bundles Three.js anyway (for the arena builders). |
 | **Separate packages per feature / workspaces** | One Vite package produces two bundles from one build id; the checks run the source directly. Packages would break the build id, the shared server bundle and the check convention. |
-| **Microservices** | One Node process runs rooms + matchmaking; Nakama is already the separate control plane. |
+| **Microservices** | One Node process runs rooms, matchmaking and lobbies; Nakama is already the separate control plane. |
 | **Abstract base classes / class hierarchies** | The codebase is factory functions returning objects (`createX`), typed by `ReturnType`. Stay consistent. |
-| **A HUD view-model layer** | Per-mode panels (§7.2) solve the concrete problem (mode branches) without a per-frame object. |
+| **A HUD view-model layer** | Per-mode panels (§7) solve the concrete problem (mode branches) without a per-frame object. |
 | **Self-registering plugins** (`registry.add()` at import) | Loses compile-time completeness; depends on import order and bundling (§12). |
 | **Generic `Clock`, `Audio`, `AssetLoader` interfaces** | No second implementation exists or is planned (§5). Add the asset loader with the first glTF asset. |
 | **TS path aliases** | Break the plain-node checks (§14). |
 | **`platform/` and `application/` layers as separate folders** | Too few files; `runtime/` covers the application role (§4.2). |
+| **A `RoomKind` interface** | Two kinds; the branches are local and commented. Extract when a third kind is planned (§10). |
+| **A generic "session manager" merging the two page stores** | Their state machines differ (Classic hands the socket over; custom keeps it and takes it back), and this layer just had four bugs fixed. Share only the identical helpers (§9.2). |
+| **A schema-driven settings form/validator** | Seven options. Revisit past about ten, or when several arrive at once (§6.9). |
+| **The lobby list in Nakama now** | One game server; the repo's own plan moves it with matchmaking when there are several. |
+| **A class per mode with methods for every lobby question** | Traits are data; `sideOf`/`startable`/`tallyKey` are three pure functions. |
+| **Profanity filtering, spectators, regions, pagination** | Product scope (the repo's plan lists them as "not in this work"), not architecture. |
 
-**Test for any new abstraction (use it in review):** *Which file would a developer otherwise have to edit to add content, or which bug does this prevent? Name it.* If you cannot, do not add it.
+**The test for any new abstraction (use it in review):** *which file would a developer otherwise have to edit to add content, or which bug does this prevent? Name it.* If you cannot, do not add it. The traits table passes it (seven shared files, three duplicated rules); a `RoomKind` interface does not yet.
 
 ---
 
@@ -1186,46 +1406,52 @@ Global invariants for **every** phase (the definition of "behaviour-preserving")
 
 ```
 game/
-├── build-id.ts · vite.config.ts · vite.server.config.ts · tsconfig*.json · package.json   (unchanged; ENTRIES += golden.check)
-├── boundaries.check.ts                   NEW (Phase 1): layer rules, server reachability, banned globals, cycles
+├── build-id.ts · vite.config.ts · vite.server.config.ts · tsconfig*.json · package.json   (unchanged)
+├── boundaries.check.ts                   NEW (Phase 1): rules, ratchets, server reachability, banned globals, every check runs
 ├── public/                               (unchanged; public/models/ when the first glTF lands)
 ├── server/                               FLAT, as today
-│   ├── main.ts · server.ts · auth.ts · lobby.ts · matchmaker.ts · room.ts
-│   ├── journal.ts                        NEW (Phase 6): ReplayLine, Given, row encode/decode (room + replay)
-│   ├── inputs.ts                         NEW (Phase 6): per-person input queue / drain / stale policy
+│   ├── main.ts · server.ts · auth.ts · lobby.ts · matchmaker.ts · custom.ts · room.ts
+│   ├── journal.ts                        NEW (Phase 7): ReplayLine, Given, row encode/decode (room + replay)
+│   ├── inputs.ts                         NEW (Phase 7): per-person input queue / drain / stale policy
 │   ├── recorder.ts · rewind.ts · fairplay.ts · records.ts · replay.ts · replay-main.ts
 │   ├── arenas.ts · headless.ts · digests.json · load.ts · browser.ts
-│   └── *.check.ts (+ golden.check.ts NEW, Phase 0)
+│   └── *.check.ts                        (custom.check.ts; golden pins in server.check.ts; + custom pins, Phase 0)
 └── src/
     ├── main.tsx · App.tsx · analytics.ts · index.css           app shell (unchanged)
-    ├── screens/                                                 React screens (unchanged; GameCanvas optionally split)
+    ├── screens/                                                 React screens
+    │   ├── custom/                       optional (Phase 6): Custom · Lobbies · Lobby (split: SlotGrid, SettingsCard, InviteCard) · LobbyForm
+    │   └── … (GameCanvas optionally split: PauseMenu, ExitConfirm, LoadingOverlay; Avatar, Confirm, Results, …)
     ├── hud/                                                     Hud.tsx (shared panels only) · minimap.ts · Chat.tsx
     ├── runtime/                                                 browser composition (the "application" layer)
     │   ├── runtime.ts            startGame: loading steps, scene, composer, loop, arena session cache, dev globals
     │   ├── match.ts              playMatch, MatchSource, Match
-    │   ├── practice.ts           createMatch (practice MatchSource)
-    │   ├── online.ts             createOnlineMatch (online MatchSource)
+    │   ├── practice.ts           createMatch (practice MatchSource, plays classic(mode))
+    │   ├── online.ts             createOnlineMatch (online MatchSource; Classic and custom)
     │   ├── loading.ts            runTasks, STARTUP (+ loading.check.ts)
     │   └── stored.ts             loadout persistence (localStorage)
-    ├── view/                                                    what the local player sees/hears/controls
+    ├── view/                                                    what the local player sees, hears and controls
     │   ├── view.ts · feed.ts · pilot.ts · input.ts · camera.ts
-    │   ├── effects.ts · audio.ts · sounds.ts · settings.ts · turntable.ts
+    │   └── effects.ts · audio.ts · sounds.ts · settings.ts · turntable.ts
     ├── render/                                                  shared Three.js infrastructure (server-reachable via arenas)
     │   ├── renderer.ts · environment.ts · postprocessing.ts · geometry.ts
     │   └── materials/ (library.ts · bake.ts · recipes.ts · facade.ts · canvasTextures.ts · groundGrime.ts · noise.ts)
     ├── sim/                                                     authoritative, headless, server-shared
     │   ├── simulation.ts · combat.ts · physics.ts · drive.ts · scoring.ts
-    │   ├── mode.ts               MatchMode / ModeRules / Feed / ModeTiming contract (no rendering types)
+    │   ├── mode.ts               MatchMode / ModeRules / Feed / ModeTiming / SupplyView (no rendering types)
     │   ├── loadout.ts            Loadout type, DEFAULT_LOADOUT, parseLoadout
+    │   ├── difficulty.ts         Skill, DIFFICULTIES (pure data; read by the wire and the lobby screens)
     │   ├── ai/ (skill.ts · brain.ts · perception.ts · navigation.ts · think.ts · ai.check.ts · bots.check.ts)
     │   └── simulation.check.ts
     ├── modes/
-    │   ├── index.ts              MODES (label, tags, blurb, teamPlay, lineUp, create); Mode
-    │   ├── views.ts              MODE_VIEWS (client only, UI level: hud and results panels)
-    │   ├── scenery.ts            MODE_SCENERY (client only, view level: pickups, zone)
-    │   ├── roster.ts             recruits, bot names/vehicle/guns
-    │   ├── ffa/  config.ts · items.ts · rules.ts · mode.ts · ffa.check.ts │ hud.tsx · results.tsx · scenery.ts (client)
-    │   └── tdm/  config.ts · types.ts · rules.ts · tactics.ts · mode.ts · tdm.check.ts │ hud.tsx · results.tsx (client)
+    │   ├── traits.ts             Mode ids, MODE_TRAITS, MAX_SEATS, sideOf (near-leaf, plain-node safe)
+    │   ├── settings.ts           MatchSettings, classic(), CUSTOM, respawnWait, checkSettings, labels
+    │   ├── index.ts              MODES (label, tags, blurb, lineUp, create; satisfies Record<Mode, …>)
+    │   ├── views.ts              MODE_VIEWS (client only, UI level: HUD and results panels)
+    │   ├── scenery.ts            MODE_SCENERY (client only, view level: FFA's hot zone)
+    │   ├── roster.ts             recruits, seat plans, bot names (MAX_SEATS of them), bot vehicle and guns
+    │   ├── items/                config.ts · items.ts · supply.ts │ pickups.ts (client: tokens, drawn from mode.supply)
+    │   ├── ffa/                  config.ts (+ traits) · rules.ts · mode.ts · ffa.check.ts │ zone.ts · hud.tsx · results.tsx (client)
+    │   └── tdm/                  config.ts (+ traits) · types.ts · rules.ts · tactics.ts · mode.ts · tdm.check.ts │ hud.tsx · results.tsx (client)
     ├── content/
     │   ├── parts.ts              wheels, tyres, blades, lamps, spikes (vehicles + arena props)
     │   ├── vehicles/ index.ts (VEHICLES) · models.ts (MODELS) · types.ts · razor/{spec.ts, model.ts}
@@ -1234,29 +1460,37 @@ game/
     │   │             kit/{props,ground,buildings,street}.ts · scrapyard/scrapyard.ts · city/city.ts
     │   └── legacy/   (owner decision: VehicleGenerator, ArenaGenerator, proceduralTexture)
     ├── net/                                                     unchanged location
-    │   ├── protocol.ts           (must stay here: deploy smoke test reads it)
-    │   ├── events.ts             NEW (Phase 3): wire-event codec shared with server/recorder.ts
+    │   ├── protocol.ts           match wire, PROTOCOL, BUILD (must stay here: the deploy smoke test reads it)
+    │   ├── lobbyProtocol.ts      NEW (Phase 4): lobby messages, actions, invite codes, the lb parser
+    │   ├── lobbyRules.ts         NEW (Phase 3): startable, tallyKey (server decides, page predicts)
+    │   ├── events.ts             NEW (Phase 4): wire-event codec shared with server/recorder.ts
     │   ├── connection.ts · client.ts · prediction.ts · snapshots.ts
-    │   ├── matchmaking.ts · session.ts · chat.ts · chatCommand.ts
+    │   ├── sessionSocket.ts      NEW (Phase 7): dial, retry schedule and loop, sessionStorage marks
+    │   ├── matchmaking.ts · custom.ts                           the page's two stores (Classic, custom lobbies)
+    │   ├── session.ts · chat.ts · chatCommand.ts
     │   └── *.check.ts
     └── shared/
         ├── rng.ts                mulberry32 (sim, content, view)
-        └── types.ts              Point, Life, clock() formatter
+        ├── types.ts              Point
+        └── format.ts             ms, clock
 ```
 
-**Dependency direction (enforced by `boundaries.check.ts`).** A module may import from its own level or any lower level, never from a higher one:
+**Dependency direction (enforced by `boundaries.check.ts`).** A module imports from its own level or any lower one, never a higher one:
 
 ```
-Level 6   screens/, hud/, modes/views.ts, modes/*/{hud,results}.tsx      React UI
-Level 5   runtime/                                                        browser composition
-Level 4   view/, net/, modes/scenery.ts, modes/*/scenery.ts               presentation, client networking, mode 3D
-Level 3   modes/ (domain: index.ts, roster.ts, */config|rules|mode|…)     rules + adapters
-Level 2   sim/                                                            authoritative gameplay
-Level 1   content/                                                        specs, models, arenas
-Level 0   render/, shared/                                                Three.js infrastructure; leaf utilities
+Level 6   screens/, hud/, modes/views.ts, modes/*/{hud,results}.tsx                React UI
+Level 5   runtime/                                                                  browser composition
+Level 4   view/, net/ (stores, client, connection), modes/scenery.ts,
+          modes/items/pickups.ts, modes/ffa/zone.ts                                 presentation, client networking, mode 3D
+Level 3   modes/ (domain: traits, settings, items, rules, adapters, registry, roster),
+          net/{protocol,lobbyProtocol,lobbyRules,events}.ts                         rules, adapters, the wire
+Level 2   sim/                                                                      authoritative gameplay
+Level 1   content/                                                                  specs, models, arenas
+Level 0   render/, shared/                                                          Three.js infrastructure; leaf utilities
 
-server/   imports Levels 0–3 and net/{protocol,events}.ts only (Level 0 render/ only through content/arenas, headless)
-net/protocol.ts and net/events.ts must additionally stay server-safe (no browser APIs)
+server/   imports Levels 0–3 only (Level 0 render/ only through content/arenas, headless);
+          browser.ts and the *.check.ts files are exempt (they emulate pages on purpose)
+net/{protocol,lobbyProtocol,lobbyRules,events}.ts must additionally stay server-safe (no browser APIs)
 ```
 
 **One extra rule on top of the levels** (§14.1, rule 3): `sim/` and the domain files of `modes/` must not import `render/` or `three/examples/**`, and use `three` only for maths. `render/` sits at Level 0 because `content/` needs it (arena and vehicle builders use the material library); the level order alone would otherwise let `sim/` reach it.
@@ -1267,35 +1501,30 @@ net/protocol.ts and net/events.ts must additionally stay server-safe (no browser
 
 | Decision | Recommendation | Why | Confidence |
 |---|---|---|---|
-| Big-bang restructure into the 9-layer tree | **No** | Most boundaries already exist; the cost is churn, broken probes/scripts/docs, conflicts | High |
-| Golden behaviour fingerprints | **Yes, first** | Nothing pins gameplay across commits today | High (need) / Medium (cross-machine stability) |
-| Mechanical boundary enforcement | **Yes**: custom `boundaries.check.ts` | Server safety is convention + a DOM shim; no dependency needed | High (need) / Medium (mechanism) |
-| TS path aliases | **No** | Break the plain-node checks | High |
-| dependency-cruiser | **No** (for now) | New dependency; a custom check covers the rules | Medium |
-| oxlint `no-restricted-imports` | Optional complement | Needs verification of rule support | Low |
-| Feature-based content folders | **Yes** (vehicles, weapons, arenas, modes), in Phase 5 | Content becomes "a folder + a registry line" | Medium |
-| Domain layer | **Yes, as the `sim/` folder** = today's headless code; no new abstractions | The boundary exists; name and enforce it | High |
-| Separate `engine/`, `platform/`, `application/` folders | **No** | Too few files; `runtime/` is the application layer | Medium |
-| `render/` folder separate from `view/` | **Yes** | Materials are server-reachable; keeps the rules exception-free | Medium |
-| Physics abstraction | **No** | One engine; determinism; prediction parity | High |
-| Network abstraction | **No new one**; `Link` + `MatchSource` already are | Verified: practice and online share the core via `MatchSource` | High |
-| Wire-event codec shared by server and client | **Yes** | Removes positional indices and a 3-file edit per event | High |
-| Weapon `id` on the spec | **Yes** | Fixes identity-by-turret-model | High |
-| Turret registry + icon/cue/ai as weapon data | **Yes** | Weapons stop editing `vehicle.ts`/`Hud.tsx`/`view.ts`/`ai.ts` | High |
-| Remove rendering from `MatchMode` (`show`) | **Yes** | The server bundle pulls pickups; the contract leaks Three.js types | High |
-| Per-mode UI panels (`MODE_VIEWS`) | **Yes** | 68 mode-referencing lines across `Hud.tsx`/`Results.tsx` | Medium-High |
-| `teamPlay` flag on the mode registry | **Yes** | Removes `room.ts:219` | High |
-| Event bus | **No** | `SimEvents` + rules queues keep ordering | High |
-| ECS | **No** | Tiny entity counts; order-dependent determinism | High |
-| DI framework / Redux / Zustand | **No** | Explicit composition in 3 places; React holds only UI state | High |
-| Split `ai.ts` | **Yes, carefully** (Phase 6) | Five responsibilities; RNG order risk | Medium |
-| Split `room.ts` (journal, inputs) | **Yes, partially** | A persisted format and a tuned policy deserve modules | Medium |
-| Keep `server/` flat | **Yes** | 13 cohesive production files | High |
-| Physics-free arena layout (separate from visuals) | **Postpone** | Digest risk on existing maps; offer it as an option for new maps | Medium |
-| Mid-match vehicle swap / second-vehicle capability | **Only when scheduled** (Phase 7, `PROTOCOL` 6) | It is a feature | High |
-| "Custom" mode | **Product decision first** | Parametrised rules = config injection into the most-checked files | Low |
-| Adopt Vitest/Jest | **No**; the owner may remove unused Vitest | The `.check.ts` convention works | High |
-| Replace Three.js maths in the sim | **No** | Changes float sequences → fingerprints/replays | High |
+| Big-bang restructure | **No** | The custom work reused every seam without a fork; a restructure relabels what holds | High |
+| Golden pins | **Done** (repo); add wire fixtures + custom pins | Cross-machine stability now shown | High |
+| Mechanical boundary enforcement | **Yes**: `boundaries.check.ts` with ratchets | Convention only today; agent claims proved unreliable | High (need) / Medium (mechanism) |
+| **Mode traits table** | **Yes** (Phase 3) | 34 mode-literal lines in 7 shared files, server included | High |
+| **Shared lobby rules** | **Yes** (Phase 3) | Side ×3, start ×2, tally ×2, 12 seats ×5 | High |
+| Leaf ids / type-cycle fix | **Yes** (Phase 2) | Ids at the top of the graph; a 14-file type cycle | Medium-High |
+| `DIFFICULTIES` as a leaf | **Yes** (Phase 2) | The wire format should not import the AI | Medium |
+| Weapon `id` on the spec | **Yes** | Identity by turret model; now behind the one-gun setting too | High |
+| Turret registry + weapon data | **Yes** | Weapons stop editing `vehicle.ts`/`Hud.tsx` | High |
+| Wire-event codec | **Yes** | Positional indices across two files | High |
+| Lobby protocol module | **Yes** (Phase 4) | `protocol.ts` 604 lines; the lobby wire will grow | Medium |
+| Shared session-socket helpers | **Yes, helpers only** | Duplicated machinery; keep two state machines | Medium |
+| Merged session manager | **No** | Different flows; fragile layer | Medium |
+| `RoomKind` object | **Not yet** | Two kinds; refactor with a third | Medium |
+| Schema-driven settings | **Not yet** | Seven options | Medium |
+| Remove rendering from `MatchMode` | **Yes** (Phase 5) | The server bundle carries the pickups and hot-zone views | High |
+| Per-mode UI panels | **Yes** (Phase 5) | HUD/Results branching | Medium-High |
+| Pickups drawn generically from `mode.supply` | **Yes** (Phase 5) | Only FFA's zone needs a per-mode view | High |
+| Feature folders / layer folders | **Yes, mechanical, optional** (Phase 6) | Navigation; least value per risk | Medium |
+| Physics abstraction, ECS, event bus, DI, state library | **No** | One engine, at most 12 machines, ordered direct calls and three small external stores: each would add indirection and put determinism at risk for no gain (§19) | High |
+| Lobby list in Nakama | **Later** (with several servers) | One server today | High |
+| Second-vehicle capability | **When scheduled** (`PROTOCOL` 7) | A feature | High |
+| Netplay timing case | **Make deterministic** (steps, not ms) | Documented flakiness | Medium |
+| Vitest | Not adopted; owner may remove | `.check.ts` works | High |
 
 ---
 
@@ -1304,150 +1533,157 @@ net/protocol.ts and net/events.ts must additionally stay server-safe (no browser
 ### Recommended refactor strategy
 
 **1. Definitely change**
-- Add golden fingerprints and golden wire bytes (Phase 0) **before anything else**.
-- Add `boundaries.check.ts` (Phase 1).
-- Weapon identity (`spec.id`) + `TURRETS` + weapon icon/cue/ai as data (Phase 2).
-- A shared wire-event codec (Phase 3).
-- Remove rendering from `MatchMode`; add `teamPlay`; add per-mode HUD/Results panels (Phase 4).
-- Dedupe `Life`/`Point`/`Seat`/loadout validation (Phase 2).
+- Close the characterization gaps (wire fixtures, custom pins) and land `boundaries.check.ts` with ratchets (Phases 0–1).
+- Weapon identity, `TURRETS`, weapon data; leaf ids and `DIFFICULTIES`; the type cycle (Phase 2).
+- **Mode traits and shared lobby rules** (Phase 3): the custom work's leaks, while they are fresh.
+- The wire-event codec and the lobby protocol module (Phase 4).
+- Rendering out of `MatchMode`; per-mode HUD/Results panels (Phase 5).
 
 **2. Probably change**
-- The folder reorganisation into `runtime/ view/ render/ sim/ modes/ content/ shared/` (Phase 5). Do it only if more content or contributors are coming soon.
-- Split `ai.ts`; extract `journal.ts` + `inputs.ts` from `room.ts`; move `createMatch` to `practice.ts` (Phase 6).
+- The folder reorganisation (Phase 6), if more content or contributors are coming.
+- Split `ai.ts`; `journal.ts` + `inputs.ts` from `room.ts`; shared session-socket helpers; split `Lobby.tsx`; make the netplay timing case deterministic (Phase 7).
 
 **3. Do not change**
-- The simulation/view/pilot/feed split.
-- `MatchSource`.
-- `MatchMode` + pure rules + `share`/`mirror`.
-- `SimEvents` as a direct interface.
-- The fixed step, the accumulator and the clamps.
-- The seeded streams and their constants.
-- Rapier creation order.
-- The binary protocol layout, `PROTOCOL`/`BUILD`, and `net/protocol.ts`'s path.
-- Arena builders and digests.
-- The headless shim approach.
-- The session caches and the "never dispose materials" rule.
-- The imperative HUD writes.
-- The `.check.ts` convention and `.ts` import extensions.
-- The flat `server/` folder and the pure matchmaker.
-- Nakama as the control plane only.
+- Everything revision 1 listed (the sim/view/pilot/feed split, `MatchSource`, `MatchMode` + pure rules, `SimEvents`, the fixed step, seeded streams, Rapier order, the binary layout, `PROTOCOL`/`BUILD`, `net/protocol.ts`'s path, arena digests, the headless shim, session caches, imperative HUD writes, the `.check.ts` convention, flat `server/`, the pure matcher, Nakama as the control plane).
+- **And from the custom work:** `server/custom.ts` pure with hooks; one settings validator; settings, lobby and seat plan in the replay header and records; empty seats keeping per-seat arrays; the absent flag that leaves Classic bytes alone; secrets never logged; custom rooms invisible to Classic; the socket handoff design (`aside`/`release`); the re-pin discipline.
 
 **4. Postpone**
-- Second-vehicle seats (until a second vehicle is scheduled).
-- A firing-behaviour table (until a third behaviour exists).
-- A physics-free arena layout.
-- A glTF asset loader and its disposal rules (until the first asset).
-- Parametrised "Custom" rules (until the product decision).
-- Per-layer tsconfig spikes.
-- The `GameCanvas` split.
-- The `netsim.ts` extraction.
+- `RoomKind`, a merged session manager, schema-driven settings, the lobby list in Nakama, second-vehicle seats (Phase 8), a firing-behaviour table, a physics-free arena layout, the glTF asset loader, per-layer tsconfig spikes.
 
-### The first 5 PRs
+### The first 5 PRs (revised)
 
 | # | PR | Scope | Why it is safe | Verification | Revert |
 |---|---|---|---|---|---|
-| **1** | **Golden fingerprints + golden wire bytes** | New `server/golden.check.ts` (bots-only, {tdm, ffa} × {scrapyard, city}, fixed seeds, 60 s, hashed state + rules events + recorder events); a golden snapshot/welcome/input/state fixture in `net/protocol.check.ts`; `vite.server.config.ts` entry; `server:check` script | Test-only | Green on CI (Node 24) and on one other machine; mutation test: change `BLAST_SHOVE` by 0.1 locally → the golden check fails | trivial |
-| **2** | **`boundaries.check.ts`** codifying today's rules | New plain-node check: 0 cycles; the server-reachable closure excludes browser-only files; gameplay files free of `Math.random`/`Date.now`/`performance.now`/`window`/`document`/`localStorage`; UI never imports Rapier; `audio.ts` reachable only from the browser side; `RATE.step * PHYSICS_STEP === 1` | Test-only; passes on today's code | Negative test in review (a temporary bad import fails with a clear message) | trivial |
-| **3** | **Weapon identity** | `WeaponSpec.id` (== key, asserted); `botGun` preserves it; `weaponId(spec) → spec.id`; callers in `room.ts`, `recorder.ts`, records, `client.ts` updated | Same id strings on the wire; no RNG change | Fingerprints + wire bytes unchanged; `server.check` records; new check: a scaled bot copy keeps its id; scratch-branch experiment: a third gun reusing the minigun turret reports its own id | single PR |
-| **4** | **Turret registry + weapon icon/cue as data** | `TURRETS` (turret key → builder); `WeaponSpec.turret` replaces the `model` union; the `vehicle.ts` ternary removed; `spec.icon` (SVG path) replaces the two hard-coded HUD SVGs; `spec.cue` with today's defaults | Presentation-only; sim untouched | Fingerprints unchanged; manual: the garage turntable shows both turrets identically; the HUD weapon panel identical for both weapons (screenshot compare); reload dimming still works | single PR |
-| **5** | **Wire-event codec** | New `net/events.ts` (layout, encode, decode, owners per code); `server/recorder.ts` and `net/client.ts` use it; round-trip check | Bytes unchanged (`PROTOCOL` stays 5) | Golden wire bytes; codec round trip; `client.check`, `netplay.check`, `server.check` replay; an old-vs-new `owners()` table asserted for every code | single PR |
+| **1** | **Wire fixtures + custom pins** | `protocol.check.ts`: committed bytes/JSON for a snapshot frame (with an absent row), a welcome with settings, a `ro`, an input, a `LobbyRow`/`LobbyView`. Two whole-match pins with custom settings (TDM 12 seats, friendly fire, all pickups, kill limit 25, fast respawn, a seat emptied and taken; FFA 2 seats, pickups off) | Test-only | Green on CI and one other machine; mutation test: flip one clamp in `packCars` → the fixture fails | trivial |
+| **2** | **`boundaries.check.ts`** | Rules 1–10 (§14.1) on today's file lists; ratchets: type cycles 1, mode literals 34; every `*.check.ts` runs; `RATE.step * PHYSICS_STEP === 1` | Test-only; passes on today's code | Negative tests in review (an `audio.ts` import into the sim; a new `'tdm'` in `server/custom.ts`; a check file dropped from `package.json`) | trivial |
+| **3** | **Leaf ids and data** | `Mode` ids in a leaf module, `MODES satisfies Record<Mode, …>`; `DIFFICULTIES` to a leaf; `ms`/`clock` to a leaf; `SupplyView` in `mode.ts`; one `Point` | Type-level and moves; no runtime change | Type-cycle ratchet → 0; pins, fixtures unchanged; `tsc -b` | single PR |
+| **4** | **Mode traits + shared lobby rules (server side, 3a)** | `MODE_TRAITS` (per-mode entries in each `config.ts`), `MAX_SEATS`, `sideOf`; `net/lobbyRules.ts` (`startable`, `tallyKey`); `matchSettings.ts`, `server/custom.ts`, `server/room.ts`, `tdm/mode.ts lineUp`, `protocol.ts SLOTS` use them | Behaviour-preserving; the server's answers unchanged | Pins; `custom.check` (71), `server.check`'s custom cases, `protocol.check`; mode-literal ratchet lowered by 13 | single PR |
+| **5** | **Weapon identity** | `WeaponSpec.id` (== key, asserted); `botGun` and the one-gun setting preserve it; `weaponId(spec) → spec.id`; callers in room, recorder, rewind, records, client | Same id strings on the wire | Fixtures and pins unchanged; `server.check` records; a scaled bot copy keeps its id | single PR |
 
-After these five: Phase 4 as three PRs (scenery out of `MatchMode` → `teamPlay` + map×mode check → HUD/Results panels). Then decide, with the owner, whether Phase 5 is worth it now.
+PR 4 (the server half of Phase 3) comes before the rest of Phase 2 on purpose: it needs only PR 3's leaf ids, and it removes the leaks a third mode or a new lobby feature would copy. The weapon PRs do not depend on it, so the order between them is free.
+
+Then: **3b** (traits in `Lobby.tsx`, `LobbyForm.tsx`, `Results.tsx`, HUD pools), the turret registry and weapon data, the codec + lobby protocol module, the UI seams.
 
 ### What would change this recommendation
 
-- **A third mode or "Custom" is scheduled** → move Phase 4 up to PR 3, and get the §7.5 decision first.
-- **A second vehicle is scheduled** → Phase 7 becomes a planned feature right after Phase 2 (it needs `PROTOCOL` 6).
-- **The golden hashes are not stable across machines** → use tolerance-based fingerprints, and treat the same-process determinism check + room=practice parity as the primary guard. The plan stays the same; the safety margin for Phase 6 (the AI split) shrinks, so postpone that split.
-- **Several people/agents start working in parallel on content** → do Phase 5 sooner; feature folders reduce merge conflicts more than anything else here.
+- **A third mode or a lobby feature is next** → do Phase 3 straight after PR 2; it is what that work would otherwise copy.
+- **A third kind of room (ranked, tournament, spectating) is planned** → extract `RoomKind` before building it.
+- **A second vehicle is scheduled** → Phase 8 right after Phase 2 (`PROTOCOL` 7).
+- **Several game servers are planned** → the lobby list and matchmaking move toward Nakama per the repo's own plan; revisit §10 then, not before.
+- **Several people or agents work in parallel** → Phase 1 first (it already is), and Phase 6 sooner.
 
 ---
 
 ## Appendix A: Import graph (current)
 
-Internal edges of production files (`type:` = type-only import), from `game/`. Checks are omitted (they may import anything). Generated by the script in Appendix B.
+Internal edges of production files at `3b0943d` (`type:` = type-only import). Paths under `game/src/` unless prefixed `server/`; inside `game/`, targets drop the `game/` prefix. Checks are omitted. Generated by the script in Appendix B.
 
 ```
-App.tsx -> game/loadout, game/maps, game/modes, type:net/connection, net/matchmaking, screens/{GameCanvas,Garage,Loading,MainMenu,MapSelect,Matchmaking}
+App.tsx -> game/loadout, game/maps, game/modes, type:net/connection, net/custom, net/matchmaking, net/protocol, screens/GameCanvas, screens/Garage, screens/Loading, screens/MainMenu, screens/MapSelect, screens/Matchmaking
+game/ArenaGenerator.ts -> rng
+game/VehicleGenerator.ts -> rng, proceduralTexture
 game/ai.ts -> type:arena/arena, combat, type:vehicle/drive
 game/arena/arena.ts -> geometry, materials/library, arena/props
-game/arena/buildings.ts -> geometry, materials/{facade,library,recipes}, rng, arena/props
-game/arena/city.ts -> geometry, materials/{facade,library}, rng, arena/{arena,buildings,ground,props,street}
+game/arena/buildings.ts -> geometry, materials/facade, materials/library, materials/recipes, rng, arena/props
+game/arena/city.ts -> geometry, materials/facade, materials/library, rng, arena/arena, arena/buildings, arena/ground, arena/props, arena/street
 game/arena/digest.ts -> type:arena/arena
 game/arena/ground.ts -> geometry, materials/library
 game/arena/props.ts -> geometry, materials/library, vehicle/parts
-game/arena/scrapyard.ts -> geometry, materials/library, rng, arena/{arena,ground,props,street}
-game/arena/street.ts -> geometry, materials/library, rng, vehicle/parts, arena/{buildings,props}
+game/arena/scrapyard.ts -> geometry, materials/library, rng, arena/arena, arena/ground, arena/props, arena/street
+game/arena/street.ts -> geometry, materials/library, rng, vehicle/parts, arena/buildings, arena/props
 game/audio.ts -> settings, sounds
 game/camera.ts -> settings
 game/environment.ts -> materials/noise
 game/feed.ts -> audio, type:mode, scoring, type:view
-game/ffa/items.ts -> ffa/config
-game/ffa/mode.ts -> type:ai, type:arena/arena, mode, ffa/{config,items,rules}
-game/ffa/pickups.ts -> materials/library, ffa/{config,items}
-game/ffa/rules.ts -> rng, scoring, ffa/{config,items}
+game/ffa/mode.ts -> type:ai, type:arena/arena, items/items, type:items/pickups, items/supply, type:matchSettings, mode, ffa/config, ffa/rules, type:ffa/zone
+game/ffa/rules.ts -> items/config, items/items, items/supply, matchSettings, mode, rng, scoring, ffa/config
+game/ffa/zone.ts -> materials/library, type:ffa/rules
+game/items/items.ts -> type:arena/arena, type:matchSettings, items/config
+game/items/pickups.ts -> materials/library, items/config, items/items
+game/items/supply.ts -> mode, type:scoring, items/config, items/items
 game/loading.ts -> physics, renderer
 game/loadout.ts -> combat, vehicle/vehicles
 game/maps.ts -> type:arena/arena, arena/city, arena/scrapyard, type:modes
-game/match.ts -> ai, type:arena/arena, arena/digest, audio, combat, feed, type:loadout, type:maps, modes, physics, pilot, roster, simulation, vehicle/drive, view
+game/match.ts -> ai, type:arena/arena, arena/digest, audio, combat, feed, type:loadout, type:maps, matchSettings, modes, physics, pilot, roster, simulation, vehicle/drive, view
+game/matchSettings.ts -> ai, combat, ffa/config, type:modes, tdm/config
 game/materials/bake.ts -> materials/noise, type:materials/recipes
 game/materials/canvasTextures.ts -> rng
 game/materials/facade.ts -> materials/recipes
-game/materials/library.ts -> renderer, materials/{bake,canvasTextures,facade,groundGrime,recipes}
-game/mode.ts -> type:ai, type:arena/arena, type:scoring
-game/modes.ts -> type:arena/arena, ffa/{config,mode,pickups}, type:simulation, tdm/{config,mode}
+game/materials/library.ts -> renderer, materials/bake, materials/canvasTextures, materials/facade, materials/groundGrime, materials/recipes
+game/mode.ts -> type:ai, type:arena/arena, type:items/supply, type:scoring
+game/modes.ts -> type:arena/arena, ffa/config, ffa/mode, ffa/zone, items/items, items/pickups, matchSettings, type:simulation, tdm/config, tdm/mode
 game/online.ts -> net/client, type:net/connection, type:arena/arena, feed, type:maps, match, simulation, view
 game/physics.ts -> type:arena/arena
 game/pilot.ts -> type:camera, input, type:simulation
 game/postprocessing.ts -> type:settings
-game/roster.ts -> ai, type:arena/arena, type:combat, modes, rng, type:simulation, type:vehicle/vehicles
+game/proceduralTexture.ts -> rng
+game/roster.ts -> ai, type:arena/arena, combat, type:matchSettings, modes, rng, type:simulation, type:vehicle/vehicles
 game/runtime.ts -> net/connection, type:ai, arena/digest, audio, environment, loading, type:loadout, maps, match, type:modes, online, physics, postprocessing, renderer, settings
 game/simulation.ts -> ai, type:arena/arena, combat, type:mode, rng, scoring, vehicle/drive, vehicle/vehicles
 game/sounds.ts -> rng
-game/tdm/mode.ts -> type:ai, type:arena/arena, mode, tdm/{config,rules,tactics}, type:tdm/types
-game/tdm/rules.ts -> scoring, tdm/config, type:tdm/types
+game/tdm/mode.ts -> type:ai, type:arena/arena, items/items, type:items/pickups, items/supply, type:matchSettings, mode, tdm/config, tdm/rules, tdm/tactics, type:tdm/types
+game/tdm/rules.ts -> items/config, items/items, items/supply, matchSettings, mode, rng, scoring, tdm/config, type:tdm/types
 game/tdm/tactics.ts -> tdm/config, type:tdm/types
+game/tdm/types.ts -> type:items/supply, type:matchSettings, type:mode, type:scoring
 game/turntable.ts -> type:combat, environment, geometry, materials/library, renderer, vehicle/vehicle, type:vehicle/vehicles
 game/vehicle/drive.ts -> physics
 game/vehicle/parts.ts -> geometry, materials/library
-game/vehicle/vehicle.ts -> type:combat, geometry, materials/library, rng, vehicle/{parts,vehicles}
+game/vehicle/vehicle.ts -> type:combat, geometry, materials/library, rng, vehicle/parts, vehicle/vehicles
 game/vehicle/vehicles.ts -> type:geometry, type:vehicle/drive
-game/view.ts -> type:arena/arena, audio, camera, effects, geometry, materials/library, type:simulation, vehicle/{drive,vehicle,vehicles}
-hud/Hud.tsx -> ffa/{config,items}, type:ffa/rules, type:match, mode, modes, settings, type:simulation, tdm/config, hud/minimap
-hud/minimap.ts -> type:arena/arena, ffa/items
+game/view.ts -> type:arena/arena, audio, camera, effects, geometry, materials/library, type:simulation, vehicle/drive, vehicle/vehicle, vehicle/vehicles
 hud/Chat.tsx -> type:net/chat, net/chatCommand, screens/search
+hud/Hud.tsx -> type:game/ffa/rules, game/items/config, game/items/items, type:game/items/supply, type:game/match, game/mode, game/modes, game/settings, type:game/simulation, game/tdm/config, hud/minimap
+hud/minimap.ts -> type:game/arena/arena, type:game/ffa/rules, game/items/items
+main.tsx -> screens/Notice
 net/chat.ts -> net/chatCommand, type:net/protocol, net/session
-net/client.ts -> type:arena/arena, combat, type:mode, modes, physics, simulation, vehicle/{drive,vehicles}, type:net/connection, net/{prediction,protocol,snapshots}
-net/connection.ts -> type:loadout, net/protocol
-net/matchmaking.ts -> type:loadout, net/{connection,protocol,session}
-net/prediction.ts -> physics, vehicle/drive, type:net/protocol
-net/protocol.ts -> combat, type:loadout, scoring, type:simulation, vehicle/vehicles
+net/client.ts -> type:game/arena/arena, game/combat, type:game/mode, game/modes, game/physics, game/simulation, game/vehicle/drive, game/vehicle/vehicles, type:net/connection, net/prediction, net/protocol, net/snapshots
+net/connection.ts -> type:game/loadout, net/protocol
+net/custom.ts -> type:game/loadout, net/connection, net/protocol, net/session
+net/matchmaking.ts -> type:game/loadout, net/connection, net/protocol, net/session
+net/prediction.ts -> game/physics, game/vehicle/drive, type:net/protocol
+net/protocol.ts -> game/combat, type:game/ai, type:game/loadout, game/matchSettings, type:game/modes, game/scoring, type:game/simulation, game/vehicle/vehicles
 net/snapshots.ts -> net/protocol
-screens/GameCanvas.tsx -> type:ai, audio, type:loading, type:loadout, maps, type:match, type:modes, runtime, net/chat, net/connection, settings, hud/{Chat,Hud}, screens/{Drawer,Menu,Results,SettingsPanel}
-screens/Garage.tsx -> combat, loading, type:loadout, turntable, vehicle/drive, vehicle/vehicles, screens/Menu
-screens/MapSelect.tsx -> ai, loading, maps, modes, net/matchmaking, screens/{Menu,search}
-screens/Matchmaking.tsx -> audio, maps, modes, net/matchmaking, screens/{Menu,search}
-screens/Results.tsx -> audio, maps, type:match, modes, type:simulation, tdm/config, screens/Menu
-server/arenas.ts -> server/headless, type:arena/arena, geometry, maps
-server/lobby.ts -> type:arena/arena, type:loadout, maps, modes, net/protocol, server/{matchmaker,room}, type:server/records
-server/main.ts -> maps, physics, server/{arenas,server}
-server/recorder.ts -> type:simulation, net/protocol
-server/replay.ts -> type:arena/arena, type:maps, physics, server/room
-server/rewind.ts -> combat, type:simulation, vehicle/vehicles
-server/room.ts -> ai, combat, type:loadout, type:arena/arena, type:maps, modes, physics, roster, simulation, arena/digest, net/protocol, server/{arenas,fairplay,recorder,rewind}
-server/server.ts -> type:arena/arena, type:maps, physics, rng, net/protocol, server/{auth,lobby,room,records}, type:server/matchmaker
+screens/Confirm.tsx -> game/audio, screens/Menu
+screens/Custom.tsx -> type:game/loadout, net/custom, net/matchmaking, screens/Lobbies, screens/Lobby, screens/search
+screens/GameCanvas.tsx -> type:game/ai, game/audio, type:game/loading, type:game/loadout, game/maps, type:game/match, type:game/modes, game/runtime, net/chat, net/connection, game/settings, hud/Chat, hud/Hud, screens/Confirm, screens/Drawer, screens/Menu, screens/Results, screens/search, screens/SettingsPanel
+screens/Garage.tsx -> game/combat, game/loading, type:game/loadout, game/turntable, game/vehicle/drive, game/vehicle/vehicles, screens/Menu
+screens/Loading.tsx -> game/loading, screens/Menu
+screens/Lobbies.tsx -> game/maps, game/matchSettings, game/modes, net/custom, net/protocol, net/session, screens/LobbyForm, screens/Menu, screens/search
+screens/Lobby.tsx -> game/ai, game/maps, game/matchSettings, game/modes, game/roster, game/tdm/config, hud/Chat, net/chat, net/custom, type:net/protocol, screens/Avatar, screens/Confirm, screens/Lobbies, screens/LobbyForm, screens/search
+screens/LobbyForm.tsx -> game/combat, game/maps, game/matchSettings, game/modes, net/custom, net/protocol, screens/Drawer, screens/Menu
+screens/MainMenu.tsx -> analytics, game/loading, net/session, screens/Drawer, screens/Menu, screens/PatchNotesPanel, screens/SettingsPanel
+screens/MapSelect.tsx -> game/ai, game/loading, type:game/loadout, game/maps, game/modes, net/matchmaking, screens/Avatar, screens/Custom, screens/Menu, screens/search
+screens/Matchmaking.tsx -> game/audio, game/maps, game/modes, net/matchmaking, screens/Menu, screens/search
+screens/Results.tsx -> game/audio, game/maps, type:game/match, game/modes, type:game/simulation, game/tdm/config, type:net/protocol, screens/Lobby, screens/Menu
+screens/SettingsPanel.tsx -> game/postprocessing, game/settings
+screens/search.ts -> net/custom, net/matchmaking
+server/arenas.ts -> type:game/arena/arena, game/geometry, game/maps
+server/browser.ts -> type:game/arena/arena, type:game/mode, game/physics, type:game/simulation, net/client, net/connection, server/auth
+server/custom.ts -> type:game/ai, type:game/matchSettings, type:game/modes, type:game/roster, net/protocol
+server/load.ts -> game/maps, game/matchSettings, game/physics, net/protocol, server/arenas, server/room
+server/lobby.ts -> type:game/arena/arena, type:game/loadout, game/maps, game/modes, net/protocol, server/custom, server/matchmaker, type:server/records, server/room
+server/main.ts -> game/maps, game/physics, server/arenas, server/server
+server/matchmaker.ts -> type:net/protocol
+server/recorder.ts -> type:game/simulation, net/protocol
+server/records.ts -> type:server/room
+server/replay-main.ts -> game/physics, server/replay, type:server/room
+server/replay.ts -> type:game/arena/arena, type:game/maps, game/physics, server/room
+server/rewind.ts -> game/combat, type:game/simulation, game/vehicle/vehicles
+server/room.ts -> game/ai, game/combat, type:game/loadout, type:game/arena/arena, type:game/maps, game/matchSettings, game/modes, game/physics, game/roster, game/simulation, game/arena/digest, net/protocol, server/arenas, server/fairplay, server/recorder, server/rewind
+server/server.ts -> type:game/arena/arena, type:game/maps, game/physics, game/rng, net/protocol, server/auth, type:server/custom, server/lobby, type:server/matchmaker, server/records, server/room
 ```
 
-Cycles: **none** (value or type).
+Cycles: value imports **none**; type-level: one strongly connected set of 14 files (§3.4).
 
 ## Appendix B: Reproducing the analysis
 
 ```bash
-git clone --depth 1 https://github.com/aasumitro/bbmvc && cd bbmvc/game
+git clone https://github.com/aasumitro/bbmvc && cd bbmvc && git checkout 3b0943d && cd game
 npm ci
-npm run lint && npx tsc -b && npm run check        # baseline (§0.3)
-grep -rn "'tdm'\|'ffa'\|\.kind ===\|kind !==" src server --include=*.ts --include=*.tsx | grep -v check.ts   # mode leaks (§7)
-grep -rn "Math.random\|performance.now\|localStorage\|window\.\|document\." src/game --include=*.ts | grep -v check.ts   # browser APIs (§3.3)
+npm run lint && npx tsc -b && npm run check                     # baseline (§0.3)
+git diff --stat f28082e 3b0943d -- .                             # the custom-lobby commit
+grep -rn "'tdm'\|'ffa'" src server --include=*.ts --include=*.tsx | grep -v check.ts | grep -v "src/game/ffa/\|src/game/tdm/"   # mode literals (§1.5)
+grep -rn "lobby ?\|lobby &&\|!lobby\|r.lobby\|room.lobby" server --include=*.ts | grep -v check.ts                                 # room-kind branches (§10)
 ```
 
-The import graph came from a ~60-line Node script. It parses `import … from`, `export … from` and side-effect imports, resolves relative specifiers to files, marks `import type`, and runs Tarjan's SCC for cycles. Dynamic `import()` (only `main.tsx → App`) was not counted. The same logic is the natural core of `boundaries.check.ts` (Phase 1).
+The import graph and cycles came from two small Node scripts: one parses `import … from`, `export … from` and side-effect imports, resolves relative specifiers, marks `import type`, and runs Tarjan's SCC; the other prints the shortest cycle through each edge (that is how the two root edges in §3.4 were found). Dynamic `import()` (only `main.tsx → App`) is not counted. The same logic is the natural core of `boundaries.check.ts`.
